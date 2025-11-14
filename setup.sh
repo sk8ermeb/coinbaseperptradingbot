@@ -16,6 +16,9 @@ else
     source "venv/bin/activate"
 fi
 
-echo "checking all python dependencies"
-pip install -r requirements.txt
+echo "Checking all python dependencies."
 
+pip install -r requirements.txt
+echo "Running trading bot."
+
+python server/run.py
