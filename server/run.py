@@ -3,26 +3,39 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 import os
-from api import router   # ← this imports and attaches
+from api import router
+from fastapi import Request, Response
+from fastapi.templating import Jinja2Templates
 
 app = FastAPI()
-app.include_router(router)   # ← this line is required!
+
+#this links the api calls to the same site from api.py
+app.include_router(router)  
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 WEB_DIR = BASE_DIR + "/web"
 DATA_DIR = BASE_DIR+ "/data"
+templates = Jinja2Templates(directory=WEB_DIR)
 
-# Serve your HTML/JS/CSS
-app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
+# Static file path
+app.mount("/static", StaticFiles(directory=os.path.join(WEB_DIR, "static")), name="static")
+
 
 @app.get("/")
-async def root():
-    return FileResponse(os.path.join(WEB_DIR, "index.html"))
+async def root(request: Request):
+    user = None
+    session_id = request.cookies.get("sessionid")
+    if session_id and is_valid_session(session_id):  # your check
+        user = get_user_from_session(session_id)
 
-# Your API endpoints
-#@app.get("/api/hello")
-#async def hello():
-#    return {"message": "Hello from FastAPI + Uvicorn"}
+    return templates.TemplateResponse(
+        "index.html",
+        {"request": request, "user": user}  # pass anything you want
+    )
+#@app.get("/")
+#async def root():
+#    return FileResponse(os.path.join(WEB_DIR, "index.html"))
+
 
 # Run with: python server.py   (or uvicorn server:app --reload)
 if __name__ == "__main__":
