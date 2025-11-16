@@ -6,20 +6,21 @@ import os
 from api import router
 from fastapi import Request, Response
 from fastapi.templating import Jinja2Templates
-
+from util import util
 app = FastAPI()
 
 #this links the api calls to the same site from api.py
 app.include_router(router)  
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-WEB_DIR = BASE_DIR + "/web"
-DATA_DIR = BASE_DIR+ "/data"
+WEB_DIR = os.path.join(BASE_DIR, "web")
+DATA_DIR = os.path.join(BASE_DIR,"data")
 templates = Jinja2Templates(directory=WEB_DIR)
 
 # Static file path
 app.mount("/static", StaticFiles(directory=os.path.join(WEB_DIR, "static")), name="static")
 
+myutil = util()
 
 @app.get("/")
 async def root(request: Request):
@@ -32,12 +33,18 @@ async def root(request: Request):
         "index.html",
         {"request": request, "user": user}  # pass anything you want
     )
-#@app.get("/")
-#async def root():
-#    return FileResponse(os.path.join(WEB_DIR, "index.html"))
 
 
 # Run with: python server.py   (or uvicorn server:app --reload)
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    serverip = myutil.getconfig('serverip')
+    serverport = myutil.getconfig('serverport')
+    tls = myutil.getconfig('tls')
+    if(tls.lower() == 'true'):
+        print("Running with TLS enabled")
+        cert, key = myutil.getservercert()
+        uvicorn.run(app, host=serverip, port=int(serverport), ssl_keyfile=key, ssl_certfile=cert)
+    else:
+        print("Running without TLS enabled")
+        uvicorn.run(app, host=serverip, port=int(serverport))

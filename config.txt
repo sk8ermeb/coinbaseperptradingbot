@@ -1,2 +1,25 @@
+#change to 0.0.0.0 to allow other machines to connect
 serverip:127.0.0.1
+
+#change to 80 for default web port
 serverport:8080
+
+#don't require login to use the server
+anonymous:true
+
+#set a user name and password if anonomous is set to false.
+#this will be a simple login for the site.
+user:bob
+pass:password
+
+#set this to true if you want interactions to be encrypted
+#definitely set to true if you set anonymous to false otherwise
+#your password will be visible to the whole network. Also 
+#set port to 443 if you want the default port for TLS. You
+#can use your own cert and key by matching the names in the
+#data file data/server.crt and data/server.pem for the cert and
+#key respectively. The system will autgenerate one if they aren't
+#present
+tls:true
+
+
