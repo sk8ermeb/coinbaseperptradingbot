@@ -17,6 +17,8 @@ WEB_DIR = os.path.join(BASE_DIR, "web")
 DATA_DIR = os.path.join(BASE_DIR,"data")
 templates = Jinja2Templates(directory=WEB_DIR)
 
+os.makedirs(DATA_DIR, exist_ok=True)
+
 # Static file path
 app.mount("/static", StaticFiles(directory=os.path.join(WEB_DIR, "static")), name="static")
 
