@@ -24,16 +24,84 @@ app.mount("/static", StaticFiles(directory=os.path.join(WEB_DIR, "static")), nam
 
 myutil = util()
 
+
+def getuserfromsession(sessionid):
+    if(sessionid is None):
+        return None
+    sessions = myutil.runselect("SELECT * FROM sessions WHERE sessionid=? LIMIT 1", (sessionid,))
+    if(len(sessions)> 0):
+        if(sessions[0]['user'] is None):
+            return myutil.getconfig("user")
+        else:
+            users = myutil.runselect("SELECT * FROM users WHERE id=?", (sessions[0]['user']))
+            return users[0]['name']
+    else:
+        return None
+
+
 @app.get("/")
 async def root(request: Request):
     user = None
-    session_id = request.cookies.get("sessionid")
-    if session_id and is_valid_session(session_id):  # your check
-        user = get_user_from_session(session_id)
-
+    resp = {"request":request}
+    session_id = request.cookies.get("session")
+    user = getuserfromsession(session_id)
+    if user is not None:
+        resp['user'] = user
+    if user is None:
+        anon = myutil.getconfig('anonymous')
+        if anon == 'true':
+            resp['anon'] = True
     return templates.TemplateResponse(
-        "index.html",
-        {"request": request, "user": user}  # pass anything you want
+        "index.html", resp
+    )
+
+
+@app.get("/backtest")
+async def root(request: Request):
+    user = None
+    resp = {"request":request}
+    session_id = request.cookies.get("session")
+    user = getuserfromsession(session_id)
+    if user is not None:
+        resp['user'] = user
+    if user is None:
+        anon = myutil.getconfig('anonymous')
+        if anon == 'true':
+            resp['anon'] = True
+    return templates.TemplateResponse(
+        "backtest.html", resp
+    )
+
+@app.get("/settings")
+async def root(request: Request):
+    user = None
+    resp = {"request":request}
+    session_id = request.cookies.get("session")
+    user = getuserfromsession(session_id)
+    if user is not None:
+        resp['user'] = user
+    if user is None:
+        anon = myutil.getconfig('anonymous')
+        if anon == 'true':
+            resp['anon'] = True
+    return templates.TemplateResponse(
+        "settings.html", resp
+    )
+
+@app.get("/algorithms")
+async def root(request: Request):
+    user = None
+    resp = {"request":request}
+    session_id = request.cookies.get("session")
+    user = getuserfromsession(session_id)
+    if user is not None:
+        resp['user'] = user
+    if user is None:
+        anon = myutil.getconfig('anonymous')
+        if anon == 'true':
+            resp['anon'] = True
+    return templates.TemplateResponse(
+        "algorithms.html", resp
     )
 
 

@@ -1,5 +1,6 @@
 import os
 import sqlite3
+from threading import Lock
 
 
 #this class is singleton so anywhere the code needs config data or to do database read/writes
@@ -12,6 +13,7 @@ class util:
     _cur = None
     _conn = None
     _sqlfile = None
+    lock = Lock()
 
     def __new__(cls, *args, **kwargs):
         if cls._instance is None:
@@ -24,6 +26,12 @@ class util:
                 id INTEGER PRIMARY KEY,
                 name TEXT,
                 pass TEXT
+            )""")
+            cur.execute("""CREATE TABLE IF NOT EXISTS sessions (
+                id INTEGER PRIMARY KEY,
+                user INTEGER,
+                sessionid TEXT,
+                expiration INTEGER
             )""")
             cur.execute("""CREATE TABLE IF NOT EXISTS candle (
                 id INTEGER PRIMARY KEY,
@@ -57,8 +65,46 @@ class util:
             conn.close()
         return cls._instance
 
-    def runselect(self):
-        self._conn = sqlite3.connect("db.sqlite")
+
+    def runinsert(self, sql:str, params:tuple)->int:
+        new_id = -1
+        with self.lock:
+            try:
+                self._conn = sqlite3.connect(self._sqlfile)
+                self._cur = self._conn.cursor()
+                self._cur.execute(sql, params)
+                new_id = self._cur.lastrowid
+                self._conn.commit()
+            finally:
+                try:
+                    self._cur.close()
+                except:
+                    pass
+                try:
+                    self._conn.close()
+                except:
+                    pass
+        return new_id
+
+    def runselect(self, sql:str, params:tuple) -> list[dict[str, object]]:
+        res = []
+        try:
+            conn = sqlite3.connect(self._sqlfile)
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+            res = [dict(row) for row in rows]
+        finally:
+            try:
+                cur.close()
+            except:
+                pass
+            try:
+                conn.close()
+            except:
+                pass
+        return res
 
     def getconfig(self, key: str) -> str:
         if self.configs is None:

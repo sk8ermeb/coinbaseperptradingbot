@@ -20,6 +20,6 @@ pass:password
 #data file data/server.crt and data/server.pem for the cert and
 #key respectively. The system will autgenerate one if they aren't
 #present
-tls:true
+tls:false
 
 
