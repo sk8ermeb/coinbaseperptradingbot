@@ -57,7 +57,7 @@ class util:
             )""")
             cur.execute("""CREATE TABLE IF NOT EXISTS metadata (
                 id INTEGER PRIMARY KEY,
-                metakey TEXT,
+                metakey TEXT UNIQUE,
                 metavalue TEXT
             )""")
             conn.commit()
@@ -65,6 +65,47 @@ class util:
             conn.close()
         return cls._instance
 
+
+    def setkeyval(self, key:str, val:str)->bool:
+        res = self.getkeyval(key)
+        if(res is not None):
+            succ = self.runupdate("UPDATE metadata SET metavalue=? WHERE metakey=?", (val, key))
+            if(succ > 0):
+                return True
+            else:
+                return False
+        else:
+            succ = self.runinsert("INSERT INTO metadata (metakey, metavalue) VALUES (?, ?)", (key, val))
+            if succ > -1:
+                return True
+            else:
+                return False
+    def getkeyval(self, key:str)-> str:
+        res = self.runselect("SELECT * FROM metadata WHERE metakey=?", (key,))
+        if(len(res) > 0):
+            return res[0]['metavalue']
+        else:
+            return None
+
+    def runupdate(self, sql:str, params:tuple)->int:
+        rowcnt = -1
+        with self.lock:
+            try:
+                self._conn = sqlite3.connect(self._sqlfile)
+                self._cur = self._conn.cursor()
+                self._cur.execute(sql, params)
+                rowcnt = self._cur.rowcount
+                self._conn.commit()
+            finally:
+                try:
+                    self._cur.close()
+                except:
+                    pass
+                try:
+                    self._conn.close()
+                except:
+                    pass
+        return rowcnt
 
     def runinsert(self, sql:str, params:tuple)->int:
         new_id = -1
@@ -105,6 +146,8 @@ class util:
             except:
                 pass
         return res
+
+    
 
     def getconfig(self, key: str) -> str:
         if self.configs is None:

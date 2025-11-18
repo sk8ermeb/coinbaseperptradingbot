@@ -3,5 +3,24 @@
 {% block title %}Settings{% endblock %}
 
 {% block content %}
-    <p>This is the settings page.</p>
+    <div class="mb-3">
+  <label for="cbkey" class="form-label">Coinbase Key</label>
+  <input type="text" class="form-control" id="cbkey" placeholder="Enter Coinbase Key" value="{{ cbkey }}" required>
+  <button type="button"
+          class="btn btn-primary mt-3"
+          onclick="saveSetting('cbkey', document.getElementById('cbkey').value)">
+    Save
+  </button>
+</div>
+<div class="mb-3">
+  <label for="cbsecret" class="form-label">Coinabse Secret</label>
+  <input type="text" class="form-control" id="cbsecret" placeholder="Enter Coinbase Secret" value="{{ cbsecret }}" required>
+  <button type="button"
+          class="btn btn-primary mt-3"
+          onclick="saveSetting('cbsecret', document.getElementById('cbsecret').value)">
+    Save
+  </button>
+</div>
+
+<script src="/static/js/settings.js"></script>
 {% endblock %}

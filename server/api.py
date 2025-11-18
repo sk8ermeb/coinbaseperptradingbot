@@ -1,6 +1,6 @@
 
 #from fastapi import APIRouter
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status, Body
 from pydantic import BaseModel
 from util import util
 import secrets
@@ -15,21 +15,28 @@ class Item(BaseModel):
     value: int
 
 async def require_session(request: Request):
-    session = request.cookies.get("session_id")
+    session = request.cookies.get("session")
+    if autil.getconfig('anonymous') == 'true':
+        return session
     if not session:
         raise HTTPException(status_code=401, detail="No session")
-    return session
+    sessions = autil.runselect("SELECT * FROM sessions WHERE sessionid=? LIMIT 1", (session,))
+    if(len(sessions)> 0):
+        return session
+    else:
+        raise HTTPException(status_code=401, detail="invalid session")
 
-@router.post("/submit")
-async def submit(
-    item: Item,                    # ← gets POST JSON body
-    session: str = Depends(require_session)  # ← validates cookie
-):
-    return {"item": item.dict(), "session": session}
+@router.post("/savesetting")
+async def savesetting(session: str = Depends(require_session),
+                     payload: dict = Body(...)):
+    key = payload['settingkey']
+    val = payload['settingval']
+    autil.setkeyval(key, val)
+    return {"session": session}
 
 
 @router.post("/login")
-async def submit(data: dict, request: Request):
+async def login(data: dict, request: Request):
     guser = autil.getconfig('user')
     gpass = autil.getconfig('pass')
     if(data['username'] == guser and data['password'] == gpass):
@@ -57,12 +64,3 @@ async def submit(data: dict, request: Request):
         headers={"WWW-Authenticate": "Bearer"},  # optional, good for APIs
     )
 
-@router.post("/submit")
-async def submit(data: dict, request: Request):
-    # Check session cookie
-    session_cookie = request.cookies.get("session_id")
-    if not session_cookie:
-        raise HTTPException(status_code=401, detail="Missing session")
-    # or validate it properly...
-    
-    return {"received": data, "session": session_cookie}
