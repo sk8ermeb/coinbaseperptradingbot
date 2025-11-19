@@ -54,11 +54,30 @@
             <div class="mb-3"><input type="password" class="form-control" name="password" placeholder="Password" required></div>
             <button type="button" 
                 class="btn btn-primary" 
-                data-bs-dismiss="modal"
                 onclick="handleLogin(
                   this.closest('.modal').querySelector('input[name=username]').value,
                   this.closest('.modal').querySelector('input[name=password]').value)">
               Login
+            </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal fade" id="messageModal" tabindex="-1">
+    <div class="modal-dialog">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title">Message</h5>
+          <button type="button" class="btn-close" onclick="closeMessageModal()"></button>
+        </div>
+        <div class="modal-body">
+          <p id=messagemodaltext></p>
+            <button type="button" 
+                class="btn btn-primary"
+                onclick="closeMessageModal()"
+                >
+              Close
             </button>
         </div>
       </div>

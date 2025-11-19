@@ -3,7 +3,7 @@
 {% block title %}Settings{% endblock %}
 
 {% block content %}
-    <div class="mb-3">
+<div class="border border-3 border-primary rounded-4 shadow-lg p-3 m-3 bg-white">
   <label for="cbkey" class="form-label">Coinbase Key</label>
   <input type="text" class="form-control" id="cbkey" placeholder="Enter Coinbase Key" value="{{ cbkey }}" required>
   <button type="button"
@@ -12,7 +12,7 @@
     Save
   </button>
 </div>
-<div class="mb-3">
+<div class="border border-3 border-primary rounded-4 shadow-lg p-3 m-3 bg-white">
   <label for="cbsecret" class="form-label">Coinabse Secret</label>
   <input type="text" class="form-control" id="cbsecret" placeholder="Enter Coinbase Secret" value="{{ cbsecret }}" required>
   <button type="button"

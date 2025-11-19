@@ -43,6 +43,12 @@ class util:
                 timestamp INTEGER,
                 duration INTEGER
             )""")
+            cur.execute("""CREATE TABLE IF NOT EXISTS scripts (
+                id INTEGER PRIMARY KEY,
+                script TEXT,
+                name TEXT,
+                status INTEGER
+            )""")
             cur.execute("""CREATE TABLE IF NOT EXISTS indicator (
                 id INTEGER PRIMARY KEY,
                 equation TEXT,

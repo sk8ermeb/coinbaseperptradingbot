@@ -3,5 +3,70 @@
 {% block title %}Algorithms{% endblock %}
 
 {% block content %}
-    <p>This is the algorithms page.</p>
+<div class="container-fluid">
+  <div class="row align-items-center g-3 flex-sm-wrap">
+    <div class="col-auto">
+      <select class="form-select" id="myDropdown" onchange="handleScriptSelect(this)">
+        <option value="-1">New Script</option>
+        {% for script in scripts %}
+          <option value="{{ script.id }}">{{ script.name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+
+    <div class="col">
+      <h5 id="scriptheadname" class="mb-0 text-center text-sm-start">New Script</h5>
+    </div>
+    
+    <div class="col-auto">
+      <button type="button" class="btn btn-primary" onclick="confirmSave()">Save Script</button>
+    </div>
+  </div>
+</div>
+
+<div class="container-fluid">
+  <div class="row">
+    <div class="col-12 p-2">
+      <div class="border border-secondary rounded-4 p-2 bg-dark" style="height:500px; overflow:hidden;">
+        <div id="editor" style="height:100%; 
+          --cm-bg:#1e1e1e; 
+          background:var(--cm-bg);">
+          <style>
+            #editor .cm-editor, #editor .cm-scroller { height:100% !important; }
+            #editor .cm-content { min-height:100%; padding-bottom:100px; }
+          </style>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+<!-- Modal -->
+<div class="modal fade" id="saveNewScriptModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Save New Script</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+          <div class="mb-3">
+            <p>Please enter a name for your new script before saving</p>
+            <input type="text" id="scriptname" class="form-control" name="scriptname" placeholder="My Script" required>
+          </div>
+          <button type="button" 
+              class="btn btn-primary" 
+              onclick="handleScriptSave()">
+            Save
+          </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+
+<script src="/static/js/editor.js"></script> 
+<script src="/static/js/algorithms.js"></script> 
 {% endblock %}

@@ -1,6 +1,6 @@
 
 #from fastapi import APIRouter
-from fastapi import APIRouter, Depends, HTTPException, Request, status, Body
+from fastapi import APIRouter, Depends, HTTPException, Request, status, Body, Query
 from pydantic import BaseModel
 from util import util
 import secrets
@@ -25,6 +25,33 @@ async def require_session(request: Request):
         return session
     else:
         raise HTTPException(status_code=401, detail="invalid session")
+
+@router.get("/fetchscript")
+async def savesetting(session: str = Depends(require_session),
+                     scriptid: int = Query(..., description="Script ID")):
+    res = autil.runselect("SELECT * FROM scripts WHERE id=?", (scriptid,))
+    if(len(res) < 1):
+        raise HTTPException(status_code=400, detail="bad request")
+    response = JSONResponse({"name": res[0]['name'], 'script': res[0]['script']})
+    return response
+
+@router.post("/savescript")
+async def savesetting(session: str = Depends(require_session),
+                     payload: dict = Body(...)):
+    scriptid = payload['scriptid']
+    scriptname = payload['scriptname']
+    script = payload['script']
+    res = -1
+    if(int(scriptid) == -1):
+        res = autil.runinsert("INSERT INTO scripts (name, script) VALUES(?,?)", (scriptname, script))
+        scriptid = res
+    else:
+        res = autil.runupdate("UPDATE scripts SET name=?, script=? WHERE id=?", (scriptname, script, scriptid))
+    if(res == -1):
+        raise HTTPException(status_code=400, detail="bad request")
+    response = JSONResponse({"scriptid": scriptid})
+    return response
+    #return {"session": session}
 
 @router.post("/savesetting")
 async def savesetting(session: str = Depends(require_session),

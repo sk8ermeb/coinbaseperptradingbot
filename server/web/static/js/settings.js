@@ -6,9 +6,10 @@ async function saveSetting(setting, value) {
   });
 
   if (response.ok) {
-	  location.reload();
+	  showMessage("Setting "+setting+" saved");
   } else {
-    alert("Failed to savesetting");
+	  showMessage("Failed to save");
+    
   }
 }
 
