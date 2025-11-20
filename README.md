@@ -11,15 +11,16 @@ dependencies. But most are pretty generic and should work on older pythons.
 ## Linux/MacOS
 ./setup.sh
 ## Windows
-git bash your-script.sh
+git bash setup.sh
 
 # Use case
 Open a browser and go 127.0.0.1:8080
+There are some settings in config.txt if you want to have TLS or login
 
 # Other Licenses
 ### bootstrap
 https://getbootstrap.com/
-### Cdoe Mirror
+### Code Mirror
 https://codemirror.net/
 ### Trading View (Light wieght charts)
 https://github.com/tradingview/lightweight-charts
