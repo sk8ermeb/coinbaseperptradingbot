@@ -3,50 +3,75 @@
 {% block title %}Backtesting{% endblock %}
 
 {% block content %}
+<link href="/static/bootstrap-5.3.8-dist/css/bootstrap-icons.css" rel="stylesheet">
+<link href="/static/css/tempus-dominus.min.css" rel="stylesheet">
+
+<div class="container-fluid">
+  <div class="row align-items-center g-3 flex-sm-wrap">
+    <div class="col-auto">
+      <select class="form-select" id="myDropdown" onchange="handleScriptSelect(this)">
+        <option value="-1">New Script</option>
+        {% for script in scripts %}
+          <option value="{{ script.id }}">{{ script.name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+
+    <div class="col-auto">
+      <button class="btn btn-primary rounded-circle d-flex align-items-center justify-content-center" 
+          style="width:40px; height:40px; padding:0;">
+        <i class="bi bi-play-fill display-6" style="margin-left:3px;"></i>
+      </button>
+    </div>
+
+    <div class="col-auto">
+      <button class="btn btn-danger">
+        <i class="bi bi-stop-fill"></i>
+      </button>
+    </div>
+    
+    <div class="col-auto">
+      <div class="input-group" id="datetimepicker1">
+        <input type="text" class="form-control" placeholder="Click the calendar">
+        <span class="input-group-text">
+          <i class="bi bi-calendar"></i>
+        </span>
+      </div>
+    </div>
+    <div class="col-auto">
+      <p> to </p>
+    </div>
+    <div class="col-auto">
+      <div class="input-group" id="datetimepicker2">
+        <input type="text" class="form-control" placeholder="Click the calendar">
+        <span class="input-group-text">
+          <i class="bi bi-calendar"></i>
+        </span>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+<ul class="nav nav-tabs" id="myTab" role="tablist">
+  <li class="nav-item" role="presentation">
+    <button class="nav-link active" data-bs-toggle="tab" data-bs-target="#charttab">Chart</button>
+  </li>
+  <li class="nav-item" role="presentation">
+    <button class="nav-link" data-bs-toggle="tab" data-bs-target="#statstab">Data</button>
+  </li>
+</ul>
+
+<div class="tab-content">
+  <div class="tab-pane active" id="charttab">
+    <div id="chart" class="shadow-sm border border-7 border-secondary rounded-4 p-2 m-3" style="width: calc(100vw - 40px); height: calc(100vh - 200px); background:#1a1a1a;"></div>
+  </div>
+  <div class="tab-pane" id="statstab">
+  </div>
+</div>
+
 <script src="/static/js/lightweight-charts.standalone.production.js"></script>
-<div id="chart" class="shadow-sm border border-7 border-secondary rounded-4 p-2 m-3" style="width: calc(100vw - 40px); height: calc(100vh - 100px); background:#1a1a1a;"></div>
-
-    <script>
-  const chart = LightweightCharts.createChart(document.getElementById('chart'), {
-    autoSize: true,
-    layout: {
-      background: { color: '#1a1a1a' },
-      textColor: '#d1d4dc',
-    },
-    grid: {
-      vertLines: { color: '#2a2e39' },
-      horzLines: { color: '#2a2e39' },
-    },
-    crosshair: {
-      mode: LightweightCharts.CrosshairMode.Normal,
-    },
-    rightPriceScale: {
-      borderColor: '#2a2e39',
-    },
-    timeScale: {
-      borderColor: '#2a2e39',
-      timeVisible: true,
-      secondsVisible: false,
-    },
-  });
-  //chart.applyOptions({ width: 800, height: 500 });
-  const candleSeries = chart.addSeries(LightweightCharts.CandlestickSeries);
-
-  // Optional: nicer candles
-  candleSeries.applyOptions({
-    upColor: '#26a69a',
-    downColor: '#ef5350',
-    borderVisible: false,
-    wickUpColor: '#26a69a',
-    wickDownColor: '#ef5350',
-  });
-candleSeries.setData([
-      { time: '2025-01-01', open: 100, high: 110, low: 95,  close: 108 },
-      { time: '2025-01-02', open: 108, high: 115, low: 105, close: 112 },
-      { time: '2025-01-03', open: 112, high: 118, low: 108, close: 110 },
-      // add more...
-    ]);
-  //candleSeries.setData([/* your data */]);
-  chart.timeScale().fitContent();
-</script>
+<script src="/static/js/popper.min.js"></script>
+<script src="/static/js/tempus-dominus.min.js"></script>
+<script src="/static/js/backtest.js"></script>
 {% endblock %}
