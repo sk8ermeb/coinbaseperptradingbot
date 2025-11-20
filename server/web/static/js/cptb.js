@@ -23,6 +23,25 @@ function showMessage(message) {
 function closeMessageModal() {
   bootstrap.Modal.getInstance(document.getElementById('messageModal')).hide();
 }
+function closeConfirmModal() {
+  bootstrap.Modal.getInstance(document.getElementById('confirmModal')).hide();
+}
+
+function showConfirmModal(question, callback) {
+  const modal = new bootstrap.Modal('#confirmModal');
+  const yesBtn = document.getElementById('yesBtn');
+
+  // Remove previous listener
+  yesBtn.replaceWith(yesBtn.cloneNode(true));
+  document.getElementById('yesBtn').onclick = () => {
+    modal.hide();
+    callback();           // ← your function runs here
+  };
+  document.getElementById("messagemodaltext").textContent = question;
+
+
+  modal.show();
+}
 
 // Fix Bootstrap aria-hidden focus warning – run once on page load
 document.querySelectorAll('.modal').forEach(modal => {

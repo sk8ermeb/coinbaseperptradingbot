@@ -35,6 +35,15 @@ async def savesetting(session: str = Depends(require_session),
     response = JSONResponse({"name": res[0]['name'], 'script': res[0]['script']})
     return response
 
+@router.delete("/deletescript/{scriptid}")
+async def savesetting(session: str = Depends(require_session),
+                      scriptid:int = -1):
+    res = autil.runupdate("DELETE FROM scripts WHERE id=?", (scriptid,))
+    if(res == -1):
+        raise HTTPException(status_code=400, detail="bad request")
+    response = JSONResponse({"scriptid": scriptid})
+    return response
+
 @router.post("/savescript")
 async def savesetting(session: str = Depends(require_session),
                      payload: dict = Body(...)):
@@ -51,7 +60,6 @@ async def savesetting(session: str = Depends(require_session),
         raise HTTPException(status_code=400, detail="bad request")
     response = JSONResponse({"scriptid": scriptid})
     return response
-    #return {"session": session}
 
 @router.post("/savesetting")
 async def savesetting(session: str = Depends(require_session),

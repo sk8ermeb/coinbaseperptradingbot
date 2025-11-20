@@ -3,6 +3,7 @@ async function handleScriptSelect(select) {
   const selectedId = select.value;           // this is the script.id
   const selectedName = select.options[select.selectedIndex].text;
   if(selectedId > -1){
+    document.getElementById('delbtn').classList.remove('d-none');
     const response = await fetch('/api/fetchscript?scriptid=' + selectedId, {
       method: 'GET',
       headers: { 'Content-Type': 'application/json' },
@@ -22,11 +23,45 @@ async function handleScriptSelect(select) {
     }
   }
   else{
+      document.getElementById('delbtn').classList.add('d-none');
       document.getElementById('scriptheadname').textContent = "New Script";
       window.editor.dispatch({
         changes: { from: 0, to: window.editor.state.doc.length, insert: "#Write your python code here" }
       });
   }
+}
+
+function confirmDelete(){
+  const select = document.getElementById('myDropdown');
+  const selectedId = select.value;
+  const selectedText = select.options[select.selectedIndex].text;
+  if(selectedId == -1){
+    showMessageModal("Can't delete unsaved script");
+  }
+  else{
+    showConfirmModal("Are you sure you want to delete "+selectedText+"? This cannot be undone.", async ()=>{
+      const response = await fetch('/api/deletescript/' + selectedId, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+      });
+
+      if (response.ok) {
+        const index = select.selectedIndex;
+        select.remove(index);          // removes the selected option
+        select.selectedIndex = 0;      // selects the new first item
+        document.getElementById('scriptheadname').textContent = "New Script";
+        window.editor.dispatch({
+          changes: { from: 0, to: window.editor.state.doc.length, insert: "#Write your python code here" }
+        });
+        document.getElementById('delbtn').classList.add('d-none');
+      }
+      else{
+      showMessageModal("Failed to delete script");
+      }
+      
+    });
+  }
+
 }
 
 function confirmSave(){
