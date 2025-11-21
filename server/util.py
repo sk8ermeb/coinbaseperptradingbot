@@ -1,7 +1,7 @@
 import os
 import sqlite3
 from threading import Lock
-
+from coinbase.rest import RESTClient
 
 #this class is singleton so anywhere the code needs config data or to do database read/writes
 #there won't be duplicate instances of anything
@@ -14,6 +14,8 @@ class util:
     _conn = None
     _sqlfile = None
     lock = Lock()
+    client = None
+    granularities = {'ONE_MINUTE':60, 'FIVE_MINUTE':300, 'FIFTEEN_MINUTE':900, 'ONE_HOUR':3600, 'SIX_HOUR':21600, 'ONE_DAY':86400}
 
     def __new__(cls, *args, **kwargs):
         if cls._instance is None:
@@ -36,12 +38,13 @@ class util:
             cur.execute("""CREATE TABLE IF NOT EXISTS candle (
                 id INTEGER PRIMARY KEY,
                 pair TEXT,
-                open INTEGER,
-                close INTEGER,
-                high INTEGER,
-                low INTEGER,
+                open DECIMAL(20,8),
+                close DECIMAL(20,8),
+                high DECIMAL(20,8),
+                low DECIMAL(20,8),
+                volume REAL,
                 timestamp INTEGER,
-                duration INTEGER
+                duration TEXT
             )""")
             cur.execute("""CREATE TABLE IF NOT EXISTS scripts (
                 id INTEGER PRIMARY KEY,
@@ -153,7 +156,19 @@ class util:
                 pass
         return res
 
-    
+    def getclient(self):
+        if(self.client is None):
+            key = None
+            secret = None
+            res = self.runselect("SELECT * FROM metadata WHERE metakey=?", ('cbkey',))
+            if(len(res)> 0):
+                key = res[0]['metavalue']
+            res = self.runselect("SELECT * FROM metadata WHERE metakey=?", ('cbsecret',))
+            if(len(res)> 0):
+                secret = res[0]['metavalue']
+            if key is not None and secret is not None:
+                self.client = RESTClient(api_key=key, api_secret=secret)
+        return self.client
 
     def getconfig(self, key: str) -> str:
         if self.configs is None:

@@ -68,6 +68,9 @@ async def root(request: Request):
         anon = myutil.getconfig('anonymous')
         if anon == 'true':
             resp['anon'] = True
+    res = myutil.runselect("SELECT * FROM scripts", ())
+    if(len(res) > 0):
+        resp['scripts'] = res
     return templates.TemplateResponse(
         "backtest.html", resp
     )

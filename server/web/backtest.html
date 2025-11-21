@@ -10,10 +10,13 @@
   <div class="row align-items-center g-3 flex-sm-wrap">
     <div class="col-auto">
       <select class="form-select" id="myDropdown" onchange="handleScriptSelect(this)">
-        <option value="-1">New Script</option>
-        {% for script in scripts %}
-          <option value="{{ script.id }}">{{ script.name }}</option>
-        {% endfor %}
+        {% if scripts is defined %}
+          {% for script in scripts %}
+            <option value="{{ script.id }}">{{ script.name }}</option>
+          {% endfor %}
+        {% else %}
+          <option value="-1">No Scripts</option>
+        {% endif %}
       </select>
     </div>
 
