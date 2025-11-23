@@ -17,6 +17,11 @@ git bash setup.sh
 Open a browser and go 127.0.0.1:8080
 There are some settings in config.txt if you want to have TLS or login
 
+# No Warrantee
+If you use this code you do so without any warrantee whatsoever. I am not liable for anything that goes wrong
+I am just writing this for myself and if ofer tech people want to see what I have done it is on them. I am 
+not checking for edge case bugs or following industry best practices for security.
+
 # Other Licenses
 ### bootstrap
 https://getbootstrap.com/
