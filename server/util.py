@@ -84,6 +84,32 @@ class util:
                 metakey TEXT UNIQUE,
                 metavalue TEXT
             )""")
+            cur.execute("""CREATE TABLE IF NOT EXISTS exchangesim (
+                id INTEGER PRIMARY KEY,
+                log TEXT,
+                granularity TEXT,
+                pair TEXT,
+                start INTEGER,
+                stop INTEGER,
+                scriptid INTEGER,
+                status INTEGER
+            )""")
+            cur.execute("""CREATE TABLE IF NOT EXISTS simevent (
+                id INTEGER PRIMARY KEY,
+                exchangesimid INTEGER,
+                candleid INTEGER,
+                eventtype TEXT,
+                eventdata TEXT,
+                fee DECIMAL(20,8),
+                metadata TEXT,
+                time INTEGER
+            )""")
+            cur.execute("""CREATE TABLE IF NOT EXISTS simasset (
+                id INTEGER PRIMARY KEY,
+                exchangesimid INTEGER,
+                assettype TEXT,
+                assetamount DECIMAL(20,8)
+            )""")
             conn.commit()
             cur.close()
             conn.close()
@@ -246,6 +272,8 @@ class util:
 
     def gethistoricledata(self, granularity:str, pair:str, start:int, stop:int):
         timebase = 0
+        product_id = pair
+        client = self.getclient()
         candles = self.runselect("SELECT * FROM candle WHERE duration=? and pair=? ORDER BY timestamp LIMIT 1", (granularity, pair))
         if(len(candles)> 0):
             timebase = candles[0]['timestamp']

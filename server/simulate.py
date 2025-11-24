@@ -6,7 +6,7 @@ import talib
 import numpy
 
 sutil = util.util()
-client = sutil.getclient()
+#client = sutil.getclient()
 
 
 #product_id = "BTC-USD"
@@ -24,16 +24,17 @@ client = sutil.getclient()
 class Simulation:
 
     def __init__(self, start, stop, scriptid):
-        scripts = sutil.runselect("SELECT * FROM scripts WHERE id=?",(scriptid,))
-        self.script = scripts[0]['script']
+        self.scriptid = scriptid
         self.start = start
         self.stop = stop
         self.N = 0
+        scripts = sutil.runselect("SELECT * FROM scripts WHERE id=?",(self.scriptid,))
+        self.script = scripts[0]['script']
         self.namespace = {}
         self.namespace['talib'] = talib
         self.namespace['numpy'] = numpy
         self.namespace['granularity'] = "ONE_HOUR"
-        self.namespace['pair'] = "BTC-PERP"
+        self.namespace['pair'] = "BTC-USD"
         self.namespace['N'] = 0
         self.namespace['opens'] = []
         self.namespace['closes'] = []
@@ -53,18 +54,20 @@ class Simulation:
         self.historysize = 100
         exec(self.script, self.namespace)
         if('pair' in self.namespace):
-            self.pair = namespace['pair']
+            self.pair = self.namespace['pair']
         if('granularity' in self.namespace):
-            self.granularity = namespace['granularity']
+            self.granularity = self.namespace['granularity']
 
 
-        self.simcandles = sutil.gethistoricaldata(self.granularity, self.pair, self.start, self.stop)
-
+        self.simcandles = sutil.gethistoricledata(self.granularity, self.pair, self.start, self.stop)
+        self.simid = sutil.runinsert("INSERT INTO exchangesim (log, granularity, pair, start, stop, scriptid) VALUES (?, ?, ?, ?, ?, ?)",
+                                     ("", self.granularity, self.pair, start, stop, scriptid))
+        sutil.setkeyval('simid', self.simid)
 
     def processtick(self):
         events = []
         indicators = []
-        currentcandles = self.simcandles[max(N-self.historysize+1, 0):N+1]
+        currentcandles = self.simcandles[max(self.N-self.historysize+1, 0):self.N+1]
         self.namespace['opens']= [d['open'] for d in currentcandles]
         self.namespace['closes']= [d['close'] for d in currentcandles]
         self.namespace['highs']= [d['high'] for d in currentcandles]
@@ -77,13 +80,18 @@ class Simulation:
         self.namespace['open'] = candle['open']
         self.namespace['close'] = candle['close']
         self.namespace['volume'] = candle['volume']
-        self.namespace['time'] = candle['time']
+        self.namespace['time'] = candle['timestamp']
        
         if('indicators' in self.namespace):
             indicators = self.namespace['indicators']()
         if('tick' in self.namespace):
             events = self.namespace['tick']
+        
+        
+
         self.N += 1
-        self.namespace['N'] = min(self.history, self.N)
+        self.namespace['N'] = min(self.historysize, self.N)
 
-
+    def runsim(self):
+        while(self.N < len(self.simcandles)):
+              self.processtick()

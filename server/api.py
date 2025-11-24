@@ -6,7 +6,7 @@ from util import util
 import secrets
 import time
 from fastapi.responses import JSONResponse
-from Simulate import Simaulate
+from simulate import Simulation
 
 autil = util()
 router = APIRouter(prefix="/api")
@@ -61,6 +61,47 @@ async def savesetting(session: str = Depends(require_session),
         raise HTTPException(status_code=400, detail="bad request")
     response = JSONResponse({"scriptid": scriptid})
     return response
+
+@router.get("/fetchsim")
+async def fetchsim(session: str = Depends(require_session),
+                     simid: int = Query(..., description="Sim ID")):
+    simidres = autil.runselect("SELECT * FROM exchangesim WHERE id=?", (simid,))
+    if(len(simidres) < 1):
+        raise HTTPException(status_code=400, detail="bad request")
+    simidres = simidres[0]
+
+    candles = autil.gethistoricledata(simidres['granularity'], simidres['pair'], simidres['start'], simidres['stop'])
+    simevents = autil.runselect("SELECT * FROM simevent WHERE exchangesimid=?", (simid,))
+    i = 0
+    for candle in candles:
+        candle['events'] = []
+        while i<len(simevents) and simevents[i]['candleid'] == candle['id']:
+            candle['events'].append(simevents[i])
+            i+=1
+    simassets = autil.runselect("SELECT * FROM simasset WHERE exchangesimid=?", (simid,))
+    response = JSONResponse({'candles':candles, 'simassets': simassets})
+    return response
+
+@router.post("/startsim")
+async def savesetting(session: str = Depends(require_session),
+                     payload: dict = Body(...)):
+    scriptid = payload['scriptid']
+    start = payload['start']
+    stop = payload['stop']
+
+    #simstatus = autil.getkeyval("simstatus")
+    #if(simstatus is None or simstatus != 'running'):
+    #    autil.setkeyval("simstatus", "running")
+    #else:
+    #    raise HTTPException(status_code=400, detail="simrunning")
+    mysim = Simulation(start, stop, scriptid)
+    simid = mysim.simid
+    #print(simid)
+    mysim.runsim()
+    #response = JSONResponse(content={"simid": simid})
+    response = JSONResponse({"simid": simid})
+    return response
+
 
 @router.post("/savesetting")
 async def savesetting(session: str = Depends(require_session),

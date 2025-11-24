@@ -9,7 +9,7 @@
 <div class="container-fluid">
   <div class="row align-items-center g-3 flex-sm-wrap">
     <div class="col-auto">
-      <select class="form-select" id="myDropdown" onchange="handleScriptSelect(this)">
+      <select class="form-select" id="scriptDropdown" onchange="handleScriptSelect(this)">
         {% if scripts is defined %}
           {% for script in scripts %}
             <option value="{{ script.id }}">{{ script.name }}</option>
@@ -21,14 +21,14 @@
     </div>
 
     <div class="col-auto">
-      <button class="btn btn-primary rounded-circle d-flex align-items-center justify-content-center" 
-          style="width:40px; height:40px; padding:0;">
+      <button id="bstartsim" class="btn btn-primary rounded-circle d-flex align-items-center justify-content-center" 
+          style="width:40px; height:40px; padding:0;" onclick="runScript()">
         <i class="bi bi-play-fill display-6" style="margin-left:3px;"></i>
       </button>
     </div>
 
     <div class="col-auto">
-      <button class="btn btn-danger">
+      <button id="bstopsim" class="btn btn-danger d-none">
         <i class="bi bi-stop-fill"></i>
       </button>
     </div>
@@ -51,6 +51,9 @@
           <i class="bi bi-calendar"></i>
         </span>
       </div>
+    </div>
+    <div class="col-auto">
+      <p id="prunsim" class="d-none">Running Sim</p>
     </div>
   </div>
 </div>
