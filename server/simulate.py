@@ -84,13 +84,23 @@ class Simulation:
        
         if('indicators' in self.namespace):
             indicators = self.namespace['indicators']()
+            for indicator in indicators:
+                ind = indicators[indicator]
+                if isinstance(ind, numpy.ndarray):
+                    ind = (ind,)
+                i =1
+                for inds in ind:
+                    res = sutil.runinsert("INSERT INTO simindicator (exchangesimid, candleid, indname, indval, time) VALUES(?,?,?,?,?)",
+                                    (self.simid, candle['id'], indicator+str(i), inds[-1], candle['timestamp']))
+                    i+=1
+
         if('tick' in self.namespace):
             events = self.namespace['tick']
         
         
 
         self.N += 1
-        self.namespace['N'] = min(self.historysize, self.N)
+        self.namespace['N'] = min(self.historysize-1, self.N)
 
     def runsim(self):
         while(self.N < len(self.simcandles)):

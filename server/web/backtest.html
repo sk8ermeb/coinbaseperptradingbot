@@ -9,7 +9,7 @@
 <div class="container-fluid">
   <div class="row align-items-center g-3 flex-sm-wrap">
     <div class="col-auto">
-      <select class="form-select" id="scriptDropdown" onchange="handleScriptSelect(this)">
+      <select class="form-select" id="scriptDropdown">
         {% if scripts is defined %}
           {% for script in scripts %}
             <option value="{{ script.id }}">{{ script.name }}</option>

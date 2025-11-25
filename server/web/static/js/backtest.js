@@ -2,11 +2,16 @@ let candleSeries;
 let chart;
 let picker1;
 let picker2;
+let chartindicators = {}
+let colors = ['#FF11FF', '#11FFFF', '#FFFF11', '#1111FF', '#11FF11', '#FF1111', '#FFFFFF', '#777777', '#77FF11' ]
 
 async function runScript() {
   const select = document.getElementById('scriptDropdown');
   const scriptid = select.value;  
   if(scriptid > -1){
+    document.getElementById('prunsim').classList.remove('d-none');
+    document.getElementById('bstopsim').classList.remove('d-none');
+    document.getElementById('bstartsim').classList.add('d-none');
     if (!picker1 || picker1.dates.picked.length === 0) return null;
     let dt1 = picker1.dates.picked[0];
     let start = Date.UTC(dt1.year, dt1.month, dt1.date, dt1.hours, dt1.minutes)/1000;
@@ -21,9 +26,6 @@ async function runScript() {
     });
 
     if (response.ok) {
-      document.getElementById('prunsim').classList.remove('d-none');
-      document.getElementById('bstopsim').classList.remove('d-none');
-      document.getElementById('bstartsim').classList.add('d-none');
       const data = await response.json();
       const simid = data['simid']
       const simresponse = await fetch('/api/fetchsim?simid=' + simid, {
@@ -35,40 +37,46 @@ async function runScript() {
         const data = await simresponse.json();
         const candles = data['candles']
         const simassets = data['simassets']
+        const indicators = data['indicators']
         clearseries()
         setseries(candles);
+        addindicators(indicators);
         chart.timeScale().fitContent();
       } else {
         showMessage("Failed to load sim");
       }
-      setTimeout(() => {
-        document.getElementById('prunsim').classList.add('d-none');
-        document.getElementById('bstopsim').classList.add('d-none');
-        document.getElementById('bstartsim').classList.remove('d-none');
-      }, 1000);
     }
     else{
+      const error = await response.json();  // { "detail": "my detail" }
+      showMessage(error.detail);
     }
 
   } else {
-    showMessage("Failed to save");
+    showMessage("You must first create a script to run in the algorithms tab (can be blank)");
     
   }
+  setTimeout(() => {
+    document.getElementById('prunsim').classList.add('d-none');
+    document.getElementById('bstopsim').classList.add('d-none');
+    document.getElementById('bstartsim').classList.remove('d-none');
+  }, 1000);
 
 }
-
 
 
 function clearseries(){
   candleSeries.setData([]);
+  for(inds in chartindicators){
+    chart.removeSeries(chartindicators[inds]);
+    delete chartindicators[inds];
+  }
 }
 function setseries(candles){
   let bars = [];
-  for (const candle of candles) { 
+  for (const candle of candles) {
     bars.push({ time: candle['timestamp'], open: candle['open'], high: candle['high'], low: candle['low'], close: candle['close'] });
   }
   candleSeries.setData(bars);
-
 }
 function addcandle(candle){
 
@@ -99,7 +107,7 @@ chart = LightweightCharts.createChart(document.getElementById('chart'), {
   });
   //chart.applyOptions({ width: 800, height: 500 });
   candleSeries = chart.addSeries(LightweightCharts.CandlestickSeries);
-
+  //candleSeries = chart.addCandlestickSeries();
   // Optional: nicer candles
   candleSeries.applyOptions({
     upColor: '#26a69a',
@@ -135,3 +143,20 @@ picker1 = new tempusDominus.TempusDominus(document.getElementById('datetimepicke
   }
 });
 
+function addindicators(indicators){
+  let j = 0;
+  for (const ind in indicators){
+    let indicatorseries = chart.addSeries(LightweightCharts.LineSeries, {
+    //let indicatorseries = chart.addLineSeries({
+      color: colors[j],
+      lineWidth: 2,
+      priceScaleId: 'right',  // Align with candles
+      title: ind
+    });
+    indicatorseries.setData(indicators[ind]);
+    chartindicators[ind] = indicatorseries;  
+    if(j>= colors.length){
+      j++;
+    }
+  }
+}

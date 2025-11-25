@@ -89,6 +89,10 @@ async def root(request: Request):
             resp['anon'] = True
     cbkey = myutil.getkeyval('cbkey')
     cbsecret = myutil.getkeyval('cbsecret')
+    if cbkey is None:
+        cbkey = ""
+    if cbsecret is None:
+        cbsecret = ""
     resp['cbkey'] = cbkey
     resp['cbsecret'] = cbsecret
     return templates.TemplateResponse(

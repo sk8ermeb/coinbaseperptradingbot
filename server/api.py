@@ -75,11 +75,19 @@ async def fetchsim(session: str = Depends(require_session),
     i = 0
     for candle in candles:
         candle['events'] = []
+        candle['indicators'] = {}
         while i<len(simevents) and simevents[i]['candleid'] == candle['id']:
             candle['events'].append(simevents[i])
             i+=1
+    simindicators = {}
+    indnames = autil.runselect("SELECT DISTINCT indname FROM simindicator WHERE exchangesimid=? ORDER BY indname", (simid,))
+    for indname in indnames:
+        name = indname['indname']
+        print(name)
+        siminddata = autil.runselect("SELECT time, indval AS value FROM simindicator WHERE exchangesimid=? AND indname=? AND indval IS NOT NULL ORDER BY time", (simid,name))
+        simindicators[name] = siminddata
     simassets = autil.runselect("SELECT * FROM simasset WHERE exchangesimid=?", (simid,))
-    response = JSONResponse({'candles':candles, 'simassets': simassets})
+    response = JSONResponse({'candles':candles, 'simassets': simassets, 'indicators':simindicators})
     return response
 
 @router.post("/startsim")
@@ -88,6 +96,10 @@ async def savesetting(session: str = Depends(require_session),
     scriptid = payload['scriptid']
     start = payload['start']
     stop = payload['stop']
+    cbkey = autil.getkeyval('cbkey')
+    cbsecret = autil.getkeyval('cbsecret')
+    if(cbkey is None or cbsecret is None or len(cbkey)==0 or len(cbsecret) == 0):
+        raise HTTPException(status_code=400, detail="Missing Coinbase Credentials")
 
     #simstatus = autil.getkeyval("simstatus")
     #if(simstatus is None or simstatus != 'running'):

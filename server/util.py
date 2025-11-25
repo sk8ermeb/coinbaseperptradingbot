@@ -59,7 +59,8 @@ class util:
                 low DECIMAL(20,8),
                 volume REAL,
                 timestamp INTEGER,
-                duration TEXT
+                duration TEXT,
+                UNIQUE (pair, timestamp)
             )""")
             cur.execute("""CREATE TABLE IF NOT EXISTS scripts (
                 id INTEGER PRIMARY KEY,
@@ -101,6 +102,16 @@ class util:
                 eventtype TEXT,
                 eventdata TEXT,
                 fee DECIMAL(20,8),
+                metadata TEXT,
+                time INTEGER
+            )""")
+            cur.execute("""CREATE TABLE IF NOT EXISTS simindicator (
+                id INTEGER PRIMARY KEY,
+                exchangesimid INTEGER,
+                candleid INTEGER,
+                indname TEXT,
+                inddata TEXT,
+                indval DECIMAL(20,8),
                 metadata TEXT,
                 time INTEGER
             )""")
@@ -298,14 +309,20 @@ class util:
                     end=str(pagediff),
                     granularity=granularity
                 )
-                tstart = pagediff
                 candles = response.to_dict()
                 candles = candles['candles']
                 print("Downloaded "+str(len(candles)) + " from coinabse")
                 for candle in candles:
-                    #print(candle)
-                    self.runinsert("INSERT INTO candle (pair, open, close, high, low, volume, timestamp, duration) VALUES(?,?,?,?,?,?,?,?)", 
-                                    (pair, candle['open'], candle['close'], candle['high'], candle['low'], candle['volume'], candle['start'], granularity))
+                    #edge cases are handles with try except instead of actually fixing the off by one bug, because coinbase includes
+                    #candle edge case where its docs says it does not. So incase the fix it this algorithm pulls 1 too many candles
+                    #and just won't insert the duplicates
+                    try:
+                        self.runinsert("INSERT INTO candle (pair, open, close, high, low, volume, timestamp, duration) VALUES(?,?,?,?,?,?,?,?)", 
+                                        (pair, candle['open'], candle['close'], candle['high'], candle['low'], candle['volume'], candle['start'], granularity))
+                    except sqlite3.IntegrityError as e:
+                        if 'UNIQUE constraint failed' in str(e):
+                            print("did not insert "+str(candle['start'])+" twice")
+                tstart = pagediff
         else:
             print("Already had candles older enough for the start time")
 
@@ -333,8 +350,12 @@ class util:
                 print("Downloaded "+str(len(candles)) + " from coinabse")
                 for candle in candles:
                     #print(candle)
-                    self.runinsert("INSERT INTO candle (pair, open, close, high, low, volume, timestamp, duration) VALUES(?,?,?,?,?,?,?,?)", 
-                                    (pair, candle['open'], candle['close'], candle['high'], candle['low'], candle['volume'], candle['start'], granularity))
+                    try:
+                        self.runinsert("INSERT INTO candle (pair, open, close, high, low, volume, timestamp, duration) VALUES(?,?,?,?,?,?,?,?)", 
+                                        (pair, candle['open'], candle['close'], candle['high'], candle['low'], candle['volume'], candle['start'], granularity))
+                    except sqlite3.IntegrityError as e:
+                        if 'UNIQUE constraint failed' in str(e):
+                            print("did not insert "+str(candle['start'])+" twice")
 
         else:
             print("We already had candles for the stop time")

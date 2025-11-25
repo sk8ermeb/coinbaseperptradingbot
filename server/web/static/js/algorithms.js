@@ -1,4 +1,15 @@
 
+const defscript = 
+`#Put Your Code Here
+pair='BTC-PERP-INTX'
+granularity='ONE_HOUR'
+def indicators():
+  sma_5 = talib.SMA(numpy.array(closes, dtype=float), timeperiod=5)
+  return {'sma_5':sma_5}
+def tick():
+  return []
+
+`;
 async function handleScriptSelect(select) {
   const selectedId = select.value;           // this is the script.id
   const selectedName = select.options[select.selectedIndex].text;
@@ -13,7 +24,6 @@ async function handleScriptSelect(select) {
       const data = await response.json();
       const script = data['script']
       const name = data['name']
-      console.log("Selected name:", name);  // use this in your JS
       document.getElementById('scriptheadname').textContent = name;
       window.editor.dispatch({
         changes: { from: 0, to: window.editor.state.doc.length, insert: script }
@@ -26,7 +36,7 @@ async function handleScriptSelect(select) {
       document.getElementById('delbtn').classList.add('d-none');
       document.getElementById('scriptheadname').textContent = "New Script";
       window.editor.dispatch({
-        changes: { from: 0, to: window.editor.state.doc.length, insert: "#Write your python code here" }
+        changes: { from: 0, to: window.editor.state.doc.length, insert: defscript }
       });
   }
 }
@@ -68,7 +78,7 @@ function confirmSave(){
   const select = document.getElementById('myDropdown');
   const selectedId = select.value;
   const selectedText = select.options[select.selectedIndex].text;
-  if(selectedId == -1){
+  if(selectedId != -1){
     document.getElementById('scriptname').value = selectedText;
   }
   else{
@@ -112,3 +122,8 @@ async function handleScriptSave(){
     showMessage("Failed to save script");
   }
 }
+document.addEventListener('DOMContentLoaded', () => {
+  window.editor.dispatch({
+    changes: { from: 0, to: window.editor.state.doc.length, insert: defscript }
+  });
+});
