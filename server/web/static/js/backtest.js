@@ -155,8 +155,9 @@ function addindicators(indicators){
     });
     indicatorseries.setData(indicators[ind]);
     chartindicators[ind] = indicatorseries;  
+    j++;
     if(j>= colors.length){
-      j++;
+      j = 0;
     }
   }
 }

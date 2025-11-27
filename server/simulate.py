@@ -4,6 +4,7 @@ from datetime import datetime
 import json
 import talib
 import numpy
+import traceback
 
 sutil = util.util()
 #client = sutil.getclient()
@@ -27,6 +28,9 @@ class Simulation:
         self.scriptid = scriptid
         self.start = start
         self.stop = stop
+        self.good = True
+    
+    #def runsetup(self):
         self.N = 0
         scripts = sutil.runselect("SELECT * FROM scripts WHERE id=?",(self.scriptid,))
         self.script = scripts[0]['script']
@@ -52,7 +56,13 @@ class Simulation:
         self.namespace['maxpositions'] = 1
         self.namespace['usd'] = 10000.00
         self.historysize = 100
-        exec(self.script, self.namespace)
+        error = ""
+        try:
+            exec(self.script, self.namespace)
+        except Exception as e:
+            print("--------eval failed!")
+            error = str(traceback.format_exc().splitlines()[-2:])
+            self.good = False
         if('pair' in self.namespace):
             self.pair = self.namespace['pair']
         if('granularity' in self.namespace):
@@ -63,6 +73,9 @@ class Simulation:
         self.simid = sutil.runinsert("INSERT INTO exchangesim (log, granularity, pair, start, stop, scriptid) VALUES (?, ?, ?, ?, ?, ?)",
                                      ("", self.granularity, self.pair, start, stop, scriptid))
         sutil.setkeyval('simid', self.simid)
+        if(not self.good):
+            print("=====setting error log")
+            sutil.runupdate("UPDATE exchangesim SET log=?, status=? WHERE id=?", (error, -1, self.simid))
 
     def processtick(self):
         events = []
@@ -83,25 +96,45 @@ class Simulation:
         self.namespace['time'] = candle['timestamp']
        
         if('indicators' in self.namespace):
-            indicators = self.namespace['indicators']()
+            try:
+                indicators = self.namespace['indicators']()
+            except Exception as e:
+                error = str(traceback.format_exc().splitlines()[-2:])
+                sutil.runupdate("UPDATE exchangesim SET log=?, status=? WHERE id=?", (error, -1, self.simid))
+                return False
             for indicator in indicators:
                 ind = indicators[indicator]
                 if isinstance(ind, numpy.ndarray):
                     ind = (ind,)
                 i =1
                 for inds in ind:
+                    indname = indicator
+                    if(len(ind) > 1):
+                        indname = indicator +"-"+str(i)
                     res = sutil.runinsert("INSERT INTO simindicator (exchangesimid, candleid, indname, indval, time) VALUES(?,?,?,?,?)",
-                                    (self.simid, candle['id'], indicator+str(i), inds[-1], candle['timestamp']))
+                                          (self.simid, candle['id'], indname, inds[-1], candle['timestamp']))
                     i+=1
 
         if('tick' in self.namespace):
-            events = self.namespace['tick']
+            try:
+                events = self.namespace['tick']
+            except Exception as e:
+                error = str(traceback.format_exc().splitlines()[-2:])
+                sutil.runupdate("UPDATE exchangesim SET log=?, status=? WHERE id=?", (error, -1, self.simid))
+                return False
         
         
 
         self.N += 1
         self.namespace['N'] = min(self.historysize-1, self.N)
+        return True
+
+
 
     def runsim(self):
+        #if not self.runsetup():
+        #    return False
         while(self.N < len(self.simcandles)):
-              self.processtick()
+            if not self.processtick():
+                return False
+        return True

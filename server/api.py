@@ -110,9 +110,12 @@ async def savesetting(session: str = Depends(require_session),
     simid = mysim.simid
     #print(simid)
     mysim.runsim()
-    #response = JSONResponse(content={"simid": simid})
-    response = JSONResponse({"simid": simid})
-    return response
+    if(mysim.good):
+        response = JSONResponse({"simid": simid})
+        return response
+    else:
+        simerr = autil.runselect("SELECT log, status FROM exchangesim WHERE id=?", (simid,))   
+        raise HTTPException(status_code=400, detail=simerr[0]['log'])
 
 
 @router.post("/savesetting")

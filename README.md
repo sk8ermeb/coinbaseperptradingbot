@@ -19,8 +19,7 @@ There are some settings in config.txt if you want to have TLS or login
 
 # No Warrantee
 If you use this code you do so without any warrantee whatsoever. I am not liable for anything that goes wrong
-I am just writing this for myself and if ofer tech people want to see what I have done it is on them. I am 
-not checking for edge case bugs or following industry best practices for security.
+I am just writing this for myself and if other tech people want to see what I have done it is on them.
 
 # Other Licenses
 ### bootstrap
