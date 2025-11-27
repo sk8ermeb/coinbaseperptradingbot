@@ -60,7 +60,6 @@ class Simulation:
         try:
             exec(self.script, self.namespace)
         except Exception as e:
-            print("--------eval failed!")
             error = str(traceback.format_exc().splitlines()[-2:])
             self.good = False
         if('pair' in self.namespace):
@@ -74,18 +73,25 @@ class Simulation:
                                      ("", self.granularity, self.pair, start, stop, scriptid))
         sutil.setkeyval('simid', self.simid)
         if(not self.good):
-            print("=====setting error log")
             sutil.runupdate("UPDATE exchangesim SET log=?, status=? WHERE id=?", (error, -1, self.simid))
+
+    def cleanarr(self, arr):
+        arr= numpy.array(arr, dtype=float)
+        missing = self.historysize - len(arr)
+        if(missing > 0):
+            arr = numpy.pad(arr, (missing, 0), constant_values=numpy.nan)
+        return arr
+
 
     def processtick(self):
         events = []
         indicators = []
         currentcandles = self.simcandles[max(self.N-self.historysize+1, 0):self.N+1]
-        self.namespace['opens']= [d['open'] for d in currentcandles]
-        self.namespace['closes']= [d['close'] for d in currentcandles]
-        self.namespace['highs']= [d['high'] for d in currentcandles]
-        self.namespace['lows']= [d['low'] for d in currentcandles]
-        self.namespace['volumes']= [d['volume'] for d in currentcandles]
+        self.namespace['opens']= self.cleanarr([d['open'] for d in currentcandles])
+        self.namespace['closes']= self.cleanarr([d['close'] for d in currentcandles])
+        self.namespace['highs']= self.cleanarr([d['high'] for d in currentcandles])
+        self.namespace['lows']= self.cleanarr([d['low'] for d in currentcandles])
+        self.namespace['volumes']= self.cleanarr([d['volume'] for d in currentcandles])
         candle = currentcandles[self.namespace['N']]
         self.namespace['candle'] = candle
         self.namespace['high']=candle['high']
@@ -94,7 +100,6 @@ class Simulation:
         self.namespace['close'] = candle['close']
         self.namespace['volume'] = candle['volume']
         self.namespace['time'] = candle['timestamp']
-       
         if('indicators' in self.namespace):
             try:
                 indicators = self.namespace['indicators']()
@@ -104,6 +109,10 @@ class Simulation:
                 return False
             for indicator in indicators:
                 ind = indicators[indicator]
+                if ind is None or isinstance(ind, (int, float, numpy.integer, numpy.floating)) or (numpy.isscalar(ind) and numpy.isnan(ind)):
+                    ind = [ind]
+                if isinstance(ind, list):
+                    ind= numpy.array(ind, dtype=float)
                 if isinstance(ind, numpy.ndarray):
                     ind = (ind,)
                 i =1

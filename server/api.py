@@ -83,7 +83,6 @@ async def fetchsim(session: str = Depends(require_session),
     indnames = autil.runselect("SELECT DISTINCT indname FROM simindicator WHERE exchangesimid=? ORDER BY indname", (simid,))
     for indname in indnames:
         name = indname['indname']
-        print(name)
         siminddata = autil.runselect("SELECT time, indval AS value FROM simindicator WHERE exchangesimid=? AND indname=? AND indval IS NOT NULL ORDER BY time", (simid,name))
         simindicators[name] = siminddata
     simassets = autil.runselect("SELECT * FROM simasset WHERE exchangesimid=?", (simid,))
@@ -108,9 +107,8 @@ async def savesetting(session: str = Depends(require_session),
     #    raise HTTPException(status_code=400, detail="simrunning")
     mysim = Simulation(start, stop, scriptid)
     simid = mysim.simid
-    #print(simid)
-    mysim.runsim()
-    if(mysim.good):
+    rungood = mysim.runsim()
+    if(mysim.good and rungood):
         response = JSONResponse({"simid": simid})
         return response
     else:
