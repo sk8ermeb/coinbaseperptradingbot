@@ -5,7 +5,7 @@ import json
 import talib
 import numpy
 import traceback
-
+from enum import Enum
 sutil = util.util()
 #client = sutil.getclient()
 
@@ -29,14 +29,17 @@ class Simulation:
         self.start = start
         self.stop = stop
         self.good = True
-    
-    #def runsetup(self):
         self.N = 0
         scripts = sutil.runselect("SELECT * FROM scripts WHERE id=?",(self.scriptid,))
         self.script = scripts[0]['script']
         self.namespace = {}
         self.namespace['talib'] = talib
         self.namespace['numpy'] = numpy
+        self.namespace['Enum'] = Enum
+        self.namespace['calcinds'] = []
+        self.namespace['nan'] = numpy.nan
+        self.namespace['TradeType'] = util.TradeType
+        self.namespace['TradeOrder'] = util.TradeOrder
         self.namespace['granularity'] = "ONE_HOUR"
         self.namespace['pair'] = "BTC-USD"
         self.namespace['N'] = 0
@@ -44,7 +47,7 @@ class Simulation:
         self.namespace['closes'] = []
         self.namespace['highs'] = []
         self.namespace['lows'] = []
-        self.namespace['valumes'] = []
+        self.namespace['volumes'] = []
         self.namespace['candles'] = []
         self.namespace['candle'] = {}
         self.namespace['high']=0
@@ -116,6 +119,8 @@ class Simulation:
                 if isinstance(ind, numpy.ndarray):
                     ind = (ind,)
                 i =1
+                indicators[indicator] = ind
+                self.indicators = indicators
                 for inds in ind:
                     indname = indicator
                     if(len(ind) > 1):
@@ -124,9 +129,13 @@ class Simulation:
                                           (self.simid, candle['id'], indname, inds[-1], candle['timestamp']))
                     i+=1
 
+        self.namespace['calcinds'] = self.indicators
         if('tick' in self.namespace):
             try:
-                events = self.namespace['tick']
+                events = self.namespace['tick']()
+                print(events)
+                for event in events:
+                    print(event)
             except Exception as e:
                 error = str(traceback.format_exc().splitlines()[-2:])
                 sutil.runupdate("UPDATE exchangesim SET log=?, status=? WHERE id=?", (error, -1, self.simid))
@@ -141,8 +150,6 @@ class Simulation:
 
 
     def runsim(self):
-        #if not self.runsetup():
-        #    return False
         while(self.N < len(self.simcandles)):
             if not self.processtick():
                 return False

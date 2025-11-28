@@ -5,6 +5,28 @@ from coinbase.rest import RESTClient
 from enum import Enum
 #this class is singleton so anywhere the code needs config data or to do database read/writes
 #there won't be duplicate instances of anything
+class TradeType(Enum):
+    EnterLong = 1
+    ExitLong = 2
+    EnterShort = 3
+    ExitShort = 4
+    Exit = 5
+class OrderType(Enum):
+    #buy at the curent market long or short price
+    Market = 1
+    #will fill if the price is better (low for long buy high for long sell) then the current market
+    Limit = 2
+    #will fill if the price is worse low for short high for long when entering. 
+    Stop_ = 3
+
+class TradeOrder:
+    def __init__(self, tradetype: TradeType = TradeType.EnterLong, amount: float=0.0, price: float=0.0):
+        self.tradetype = tradetype
+        self.Price = price
+        self.Amount = amount
+
+    def __str__(self):
+        return str(self.tradetype)+" at "+str(self.Price)+ " for $"+str(self.Amount)+" USD."
 
 class util:
     
@@ -16,21 +38,6 @@ class util:
     lock = Lock()
     client = None
     granularities = {'ONE_MINUTE':60, 'FIVE_MINUTE':300, 'FIFTEEN_MINUTE':900, 'ONE_HOUR':3600, 'SIX_HOUR':21600, 'ONE_DAY':86400}
-    class OrderType(Enum):
-        #buy at the curent market long or short price
-        market = 1
-        #will fill if the price is better (low for long buy high for long sell) then the current market
-        limit = 2
-        #set 2 prices, stop and limit. if at 100, set stop to 105, and limit to 106, will activate at 105 and fill at 106
-        stop_limit = 3
-        #bracket is on open positions only. so for a limit buy of 100 you might set 95 stop loss and 110 take profit. Coinbase
-        #set a 1.5% limit stop under the hood on the stop loss, so if the market if moving very fast you MIGHT get a price up to
-        #1.5 percent worse then what you set
-        braket = 4
-        #in simulations this just executes equal market orders given your time frame. example 2 hours, 15 minute buckets 8 buckets on
-        #1000 with execute 8 buys of $~125, essentially dollar cost averaging. In reality coinbase should always give you a better
-        #price then in simulation because its setting intelligent limit order to snag something better
-        twap = 5
 
     def __new__(cls, *args, **kwargs):
         if cls._instance is None:
