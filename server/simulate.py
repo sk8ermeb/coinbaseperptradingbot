@@ -129,13 +129,23 @@ class Simulation:
                                           (self.simid, candle['id'], indname, inds[-1], candle['timestamp']))
                     i+=1
 
-        self.namespace['calcinds'] = self.indicators
+        #self.namespace['calcinds'] = self.indicators
+        simindicators = {}
+        indnames = sutil.runselect("SELECT DISTINCT indname FROM simindicator WHERE exchangesimid=? ORDER BY indname", (self.simid,))
+        for indname in indnames:
+            name = indname['indname']
+            siminddata = sutil.runselect("SELECT indval FROM simindicator WHERE exchangesimid=? AND indname=? AND indval IS NOT NULL ORDER BY time", (self.simid,name))
+            indlist = [key['indval'] for key in siminddata]
+            indlist = self.cleanarr(indlist)
+            simindicators[name] = indlist
+        self.namespace['calcinds'] = simindicators
+
         if('tick' in self.namespace):
             try:
                 events = self.namespace['tick']()
-                print(events)
                 for event in events:
-                    print(event)
+                    sutil.runinsert("INSERT INTO simevent (exchangesimid, candleid, eventtype, eventdata, fee, metadata, time) VALUES(?,?,?,?,?,?,?)",
+                                    (self.simid, candle['id'], str(event.tradetype), str(event), 0.0, "", candle['timestamp']))
             except Exception as e:
                 error = str(traceback.format_exc().splitlines()[-2:])
                 sutil.runupdate("UPDATE exchangesim SET log=?, status=? WHERE id=?", (error, -1, self.simid))

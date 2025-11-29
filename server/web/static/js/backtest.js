@@ -1,5 +1,6 @@
 let candleSeries;
 let chart;
+let markersPrimitive;
 let picker1;
 let picker2;
 let chartindicators = {}
@@ -36,11 +37,13 @@ async function runScript() {
       if (simresponse.ok) {
         const data = await simresponse.json();
         const candles = data['candles']
-        const simassets = data['simassets']
+        const simassets = data['assets']
+        const events = data['events']
         const indicators = data['indicators']
         clearseries()
         setseries(candles);
         addindicators(indicators);
+        setevents(events);
         chart.timeScale().fitContent();
       } else {
         showMessage("Failed to load sim");
@@ -63,9 +66,43 @@ async function runScript() {
 
 }
 
+function setevents(events){
+  let markers = []
+  for(const myev of events){
+    let Color = '';
+    let Shape = '';
+    if(myev['eventtype'].includes('EnterLong'))
+    {
+      Color = colors[5];
+      Shape = 'arrowUp';
+    }
+    else if(myev['eventtype'].includes('EnterShort'))
+    {
+      Color = colors[6];
+      Shape = 'arrowDown';
+    }
+    else if(myev['eventtype'].includes('ExitLong'))
+    {
+      Color = colors[7];
+      Shape = 'square';
+    }
+    else if(myev['eventtype'].includes('ExitShort'))
+    {
+      Color = colors[8];
+      Shape = 'square';
+    }
+    else{
+      Color = colors[4];
+      Shape = 'square';
+    }
+    markers.push({time: myev['time'], position: 'aboveBar', color:Color, shape:Shape, text:myev['eventdata']})
+  }
+  markersPrimitive.setMarkers(markers);
+}
 
 function clearseries(){
   candleSeries.setData([]);
+  markersPrimitive.setMarkers([])
   for(inds in chartindicators){
     chart.removeSeries(chartindicators[inds]);
     delete chartindicators[inds];
@@ -122,6 +159,7 @@ candleSeries.setData([
       { time: '2025-01-03', open: 112, high: 118, low: 108, close: 110 },
       // add more...
     ]);
+  markersPrimitive = LightweightCharts.createSeriesMarkers(candleSeries, []);
   //candleSeries.setData([/* your data */]);
   chart.timeScale().fitContent();
 
@@ -147,7 +185,6 @@ function addindicators(indicators){
   let j = 0;
   for (const ind in indicators){
     let indicatorseries = chart.addSeries(LightweightCharts.LineSeries, {
-    //let indicatorseries = chart.addLineSeries({
       color: colors[j],
       lineWidth: 2,
       priceScaleId: 'right',  // Align with candles

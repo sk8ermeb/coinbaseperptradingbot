@@ -72,13 +72,13 @@ async def fetchsim(session: str = Depends(require_session),
 
     candles = autil.gethistoricledata(simidres['granularity'], simidres['pair'], simidres['start'], simidres['stop'])
     simevents = autil.runselect("SELECT * FROM simevent WHERE exchangesimid=?", (simid,))
-    i = 0
-    for candle in candles:
-        candle['events'] = []
-        candle['indicators'] = {}
-        while i<len(simevents) and simevents[i]['candleid'] == candle['id']:
-            candle['events'].append(simevents[i])
-            i+=1
+    #i = 0
+    #for candle in candles:
+    #    candle['events'] = []
+    #    candle['indicators'] = {}
+    #    while i<len(simevents) and simevents[i]['candleid'] == candle['id']:
+    #        candle['events'].append(simevents[i])
+    #        i+=1
     simindicators = {}
     indnames = autil.runselect("SELECT DISTINCT indname FROM simindicator WHERE exchangesimid=? ORDER BY indname", (simid,))
     for indname in indnames:
@@ -86,7 +86,7 @@ async def fetchsim(session: str = Depends(require_session),
         siminddata = autil.runselect("SELECT time, indval AS value FROM simindicator WHERE exchangesimid=? AND indname=? AND indval IS NOT NULL ORDER BY time", (simid,name))
         simindicators[name] = siminddata
     simassets = autil.runselect("SELECT * FROM simasset WHERE exchangesimid=?", (simid,))
-    response = JSONResponse({'candles':candles, 'simassets': simassets, 'indicators':simindicators})
+    response = JSONResponse({'candles':candles, 'assets': simassets, 'indicators':simindicators, 'events':simevents})
     return response
 
 @router.post("/startsim")

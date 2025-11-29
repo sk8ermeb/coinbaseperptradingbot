@@ -4,17 +4,17 @@ const defscript =
 pair='BTC-PERP-INTX'
 granularity='ONE_HOUR'
 def indicators():
-  sma_5 = talib.SMA(closes, timeperiod=5)
-  boiler = talib.BBANDS(
-    numpy.array(closes),
-    timeperiod=20,      # usually 20 periods
-    nbdevup=2,          # number of std devs for upper band
-    nbdevdn=2,          # number of std devs for lower band
-    matype=0            # 0 = Simple Moving Average (most common)
-  )
+  sma_5 = talib.SMA(closes, timeperiod=10)
   mysma = (opens[-1]+opens[-2]+opens[-3])/3.0
-  return {'mysma':mysma, 'sma5':sma_5, 'boiler':boiler}
+  return {'mysma':mysma, 'sma5':sma_5}
 def tick():
+  mysma = calcinds['mysma']
+  sma5 = calcinds['sma5']
+  diff = (mysma[-1] - sma5[-1])/sma5[-1]
+  if(diff is nan):
+    return []
+  if(diff > 0.01):
+    return [TradeOrder(tradetype=TradeType.EnterLong, amount=100, price=90000)]
   return []
 `;
 async function handleScriptSelect(select) {
