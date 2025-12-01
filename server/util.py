@@ -3,30 +3,75 @@ import sqlite3
 from threading import Lock
 from coinbase.rest import RESTClient
 from enum import Enum
+import json
 #this class is singleton so anywhere the code needs config data or to do database read/writes
 #there won't be duplicate instances of anything
 class TradeType(Enum):
+    NoTrade = 0
     EnterLong = 1
     ExitLong = 2
     EnterShort = 3
     ExitShort = 4
     Exit = 5
 class OrderType(Enum):
+    NoOrder = 0
     #buy at the curent market long or short price
     Market = 1
     #will fill if the price is better (low for long buy high for long sell) then the current market
     Limit = 2
     #will fill if the price is worse low for short high for long when entering. 
-    Stop_ = 3
+    Stop = 3
 
 class TradeOrder:
-    def __init__(self, tradetype: TradeType = TradeType.EnterLong, amount: float=0.0, price: float=0.0):
+    def __init__(self, tradetype: TradeType = TradeType.NoTrade, amount: float=0.0, price: float=0.0, ordertype: OrderType=OrderType.NoOrder, fee: float=0.0):
         self.tradetype = tradetype
         self.Price = price
         self.Amount = amount
+        self.ordertype = ordertype
+        self.Fee=fee
 
     def __str__(self):
-        return str(self.tradetype)+" at "+str(self.Price)+ " for $"+str(self.Amount)+" USD."
+        return self.tradetype.name+" at "+str(self.Price)+ " for $"+str(self.Amount)+" USD."
+    def getjson(self):
+        mydict = {'tradetype':self.tradetype.name, 'price':self.Price, 'amount':self.Amount, 'fee':self.Fee, 'ordertype':self.ordertype.name}
+        return json.dumps(mydict)
+    def fromjson(jsonstr):
+        mydict = json.loads(jsonstr)
+        tradetype = TradeType[mydict['tradetype']]
+        price = mydict['price']
+        amount = mydict['amount']
+        fee = mydict['fee']
+        ordertype = OrderType[mydict['ordertype']]
+
+        myto = TradeOrder(tradetype=tradetype, amount=amount, price=price, ordertype=ordertype, fee=fee)
+        return myto
+
+
+class TradePosition:
+    def __init__(self, tradetype: TradeType = TradeType.NoTrade, amount: float=0.0, price: float=0.0, ordertype: OrderType=OrderType.NoOrder, fee: float=0.0):
+        self.tradetype = tradetype
+        self.Price = price
+        self.Amount = amount
+        self.ordertype = ordertype
+        self.Fee=fee
+
+    def __str__(self):
+        return self.tradetype.name+" at "+str(self.Price)+ " for $"+str(self.Amount)+" USD."
+    def getjson(self):
+        mydict = {'tradetype':self.tradetype.name, 'price':self.Price, 'amount':self.Amount, 'fee':self.Fee, 'ordertype':self.ordertype.name}
+        return json.dumps(mydict)
+    def fromjson(jsonstr):
+        mydict = json.loads(jsonstr)
+        tradetype = TradeType[mydict['tradetype']]
+        price = mydict['price']
+        amount = mydict['amount']
+        fee = mydict['fee']
+        ordertype = OrderType[mydict['ordertype']]
+
+        myto = TradeOrder(tradetype=tradetype, amount=amount, price=price, ordertype=ordertype, fee=fee)
+        return myto
+
+
 
 class util:
     
@@ -107,6 +152,7 @@ class util:
                 exchangesimid INTEGER,
                 candleid INTEGER,
                 eventtype TEXT,
+                ordertype TEXT,
                 eventdata TEXT,
                 fee DECIMAL(20,8),
                 metadata TEXT,
@@ -126,13 +172,27 @@ class util:
                 id INTEGER PRIMARY KEY,
                 exchangesimid INTEGER,
                 assettype TEXT,
-                assetamount DECIMAL(20,8)
+                assetamount DECIMAL(20,8),
+                UNIQUE (assettype, assetamount)
             )""")
             conn.commit()
             cur.close()
             conn.close()
         return cls._instance
 
+    def setasset(self, assetname, amount, simid=None):
+        amount = self.getasset(assetname, simid)
+        if(amount is None):
+            self.runinsert("INSERT INTO simasset (exchangesimid, assettype, assetamount) VALUES(?,?,?)")
+        else: 
+            self.runupdate("UPDATE simasset SET assetamount=? WHERE assettype=? AND exchangesimid=?")
+
+    def getasset(self, assetname, simid=None):
+        assetentry = self.runselect("SELECT * FROM simasset WHERE assettype=? and exchangesimid=? LIMIT 1")
+        if len(assetentry) > 0:
+            return assetentry[0]['assetamount']
+        else:
+            return None
 
     def setkeyval(self, key:str, val:str)->bool:
         res = self.getkeyval(key)

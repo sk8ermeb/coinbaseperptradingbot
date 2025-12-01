@@ -41,7 +41,7 @@ class Simulation:
         self.namespace['TradeType'] = util.TradeType
         self.namespace['TradeOrder'] = util.TradeOrder
         self.namespace['granularity'] = "ONE_HOUR"
-        self.namespace['pair'] = "BTC-USD"
+        self.namespace['pair'] = "btc"
         self.namespace['N'] = 0
         self.namespace['opens'] = []
         self.namespace['closes'] = []
@@ -57,7 +57,12 @@ class Simulation:
         self.namespace['volume'] = 0
         self.namespace['time'] = 0
         self.namespace['maxpositions'] = 1
+        self.namespace['makerfee'] = 0.0003
+        self.namespace['takerfee'] = 0.0001
         self.namespace['usd'] = 10000.00
+        self.namespace['btc'] = 0
+        self.namespace['eth'] = 0
+        self.namespace['fee'] = 0
         self.historysize = 100
         error = ""
         try:
@@ -77,6 +82,8 @@ class Simulation:
         sutil.setkeyval('simid', self.simid)
         if(not self.good):
             sutil.runupdate("UPDATE exchangesim SET log=?, status=? WHERE id=?", (error, -1, self.simid))
+
+        sutil.setasset('USD', 10000.00, self.simid)
 
     def cleanarr(self, arr):
         arr= numpy.array(arr, dtype=float)
@@ -146,6 +153,151 @@ class Simulation:
                 for event in events:
                     sutil.runinsert("INSERT INTO simevent (exchangesimid, candleid, eventtype, eventdata, fee, metadata, time) VALUES(?,?,?,?,?,?,?)",
                                     (self.simid, candle['id'], str(event.tradetype), str(event), 0.0, "", candle['timestamp']))
+                positions = sutil.getkeyval("simpositions")
+                maxpos = self.namespace['maxpositions']
+                makerfee = self.namespace['makerfee']
+                takerfee = self.namespace['takerfee']
+                usd = self.namespace['usd']
+                pair = self.namespace['pair']
+                if positions is not None:
+                    positions = json.loads(positions)
+                else:
+                    positions = []
+                #first see if any limit or stop order will be filled this tick
+                for position in positions:
+                    if position['ordertype'] == util.OrderType.Limit.name:
+                        if position['side'] == 'buy':
+                            if position['tradetype'] == TradeType.EnterLong.name:
+                                if candle['low'] <= position['price']:
+                                    crypt = ((1-makerfee)*position['amount'])/position['price']
+                                    fee = makerfee*position['amount']
+                                    self.namespace['usd'] -= position['amount']
+                                    self.namespace[pair] += crypt
+                                else:
+                                    #price did not hit limit
+                                    pass
+                            elif position['tradetype'] == TradeType.ExitLong.name:
+                                if candle['high'] >= position['price']:
+                                    usd = position['amount']*position['price']
+                                    fee = makerfee*usd
+                                    usd = usd*(1-makerfee)
+                                    self.namespace['usd'] += position['amount']
+                                    self.namespace[pair] -= crypt
+                                else:
+                                    #price did not hit limit
+                                    pass
+                        elif position['side'] == 'sell':
+                            if position['tradetype'] == TradeType.EnterShort.name:
+                                if candle['high'] >= position['price']:
+                                    crypt = ((1-makerfee)*position['amount'])/position['price']
+                                    fee = makerfee*position['amount']
+                                    self.namespace['usd'] -= position['amount']
+                                    self.namespace[pair] += crypt
+                                else:
+                                    #price did not hit limit
+                                    pass
+                            elif position['tradetype'] == TradeType.ExitShort.name:
+                                if candle['low'] <= position['price']:
+                                    usd = position['amount']*position['price']
+                                    fee = makerfee*usd
+                                    usd = usd*(1-makerfee)
+                                    self.namespace['usd'] += position['amount']
+                                    self.namespace[pair] -= crypt
+                                else:
+                                    #price did not hit limit
+
+                    if position['ordertype'] == util.OrderType.Stop.name:
+                        if position['side'] == 'buy':
+                            if position['tradetype'] == TradeType.EnterLong.name:
+                                if candle['high'] >= position['price']:
+                                    crypt = ((1-makerfee)*position['amount'])/position['price']
+                                    fee = makerfee*position['amount']
+                                    self.namespace['usd'] -= position['amount']
+                                    self.namespace[pair] += crypt
+                                else:
+                                    #price did not hit stop
+                                    pass
+                            elif position['tradetype'] == TradeType.ExitLong.name:
+                                if candle['low'] <= position['price']:
+                                    usd = position['amount']*position['price']
+                                    fee = makerfee*usd
+                                    usd = usd*(1-makerfee)
+                                    self.namespace['usd'] += position['amount']
+                                    self.namespace[pair] -= crypt
+                                else:
+                                    #price did not hit limit
+                                    pass
+                        elif position['side'] == 'sell':
+                            if position['tradetype'] == TradeType.EnterShort.name:
+                                if candle['low'] <= position['price']:
+                                    crypt = ((1-makerfee)*position['amount'])/position['price']
+                                    fee = makerfee*position['amount']
+                                    self.namespace['usd'] -= position['amount']
+                                    self.namespace[pair] += crypt
+                                else:
+                                    #price did not hit limit
+                                    pass
+                            elif position['tradetype'] == TradeType.ExitShort.name:
+                                if candle['high'] >= position['price']:
+                                    usd = position['amount']*position['price']
+                                    fee = makerfee*usd
+                                    usd = usd*(1-makerfee)
+                                    self.namespace['usd'] += position['amount']
+                                    self.namespace[pair] -= crypt
+                                else:
+                                    #price did not hit limit
+                    
+                    if position['ordertype'] == util.OrderType.Market.name:
+                        if position['side'] == 'buy':
+                            if position['tradetype'] == TradeType.EnterLong.name:
+                                crypt = ((1-makerfee)*position['amount'])/candle['close']
+                                fee = makerfee*position['amount']
+                                self.namespace['usd'] -= position['amount']
+                                self.namespace[pair] += crypt
+                            elif position['tradetype'] == TradeType.ExitLong.name:
+                                usd = position['amount']*candle['close']
+                                fee = makerfee*usd
+                                usd = usd*(1-makerfee)
+                                self.namespace['usd'] += position['amount']
+                                self.namespace[pair] -= crypt
+                        elif position['side'] == 'sell':
+                            if position['tradetype'] == TradeType.EnterShort.name:
+                                crypt = ((1-makerfee)*position['amount'])/candle['close']
+                                fee = makerfee*position['amount']
+                                self.namespace['usd'] -= position['amount']
+                                self.namespace[pair] += crypt
+                            elif position['tradetype'] == TradeType.ExitShort.name:
+                                usd = position['amount']*candle['close']
+                                fee = makerfee*usd
+                                usd = usd*(1-makerfee)
+                                self.namespace['usd'] += position['amount']
+                                self.namespace[pair] -= crypt
+
+
+
+                for event in events:
+                    amount = event.Amount
+                    price = event.Price
+                    ordertype = util.OrderType.NoOrder
+                    close = self.namespace['close']
+                    if event.tradetype == util.TradeType.EnterLong:
+                        if len(positions)<maxpos:
+                            if amount ==0:
+                                amount = (usd*0.99)/(maxpos - len(positions))
+                            if price == 0
+                                price = close
+                                ordertype = util.OrderType.Market
+                            elif price < close:
+                                ordertype = util.OrderType.Limit
+                            else:
+                                ordertype = util.OrderType.Stop
+                        positions.append({'ordertype':ordertype.name, 'price':price, 'amount':amount, 'side':'buy'})
+                        
+                                
+                            
+
+                        
+
             except Exception as e:
                 error = str(traceback.format_exc().splitlines()[-2:])
                 sutil.runupdate("UPDATE exchangesim SET log=?, status=? WHERE id=?", (error, -1, self.simid))
