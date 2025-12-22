@@ -21,29 +21,42 @@ class OrderType(Enum):
     Limit = 2
     #will fill if the price is worse low for short high for long when entering. 
     Stop = 3
+    #Simulatenous Limit and Stop order on the same funds
+    Bracket = 4
 
 class TradeOrder:
-    def __init__(self, tradetype: TradeType = TradeType.NoTrade, amount: float=0.0, price: float=0.0, ordertype: OrderType=OrderType.NoOrder, fee: float=0.0):
+    def __init__(self, tradetype: TradeType = TradeType.NoTrade, amount: float=0.0, limitprice: float=0.0, 
+                 stopprice: float=0.0, ordertype: OrderType=OrderType.NoOrder, fee: float=0.0,
+                 limittrailpercent: float=0.0, stoptrailpercent: float=0.0):
         self.tradetype = tradetype
-        self.Price = price
-        self.Amount = amount
+        self.amount = amount
+        self.limitprice = limitprice
+        self.stopprice = stopprice
         self.ordertype = ordertype
-        self.Fee=fee
+        self.fee=fee
+        self.limittrailpercent = limittrailpercent
+        self.stoptrailoercent = stoptrailpercent
 
     def __str__(self):
-        return self.tradetype.name+" at "+str(self.Price)+ " for $"+str(self.Amount)+" USD."
+        return self.getjson()
     def getjson(self):
-        mydict = {'tradetype':self.tradetype.name, 'price':self.Price, 'amount':self.Amount, 'fee':self.Fee, 'ordertype':self.ordertype.name}
+        mydict = {'tradetype':self.tradetype.name, 'amount':self.amount, 'limitprice':self.limitPrice,
+                  'stopprice':self.StopPrie, 'ordertype':self.ordertype.name, 'fee':self.fee,
+                  'limittrailpercent':self.limittrailpercent, 'stoptrailpercent':self.stoptrailpercent}
         return json.dumps(mydict)
     def fromjson(jsonstr):
         mydict = json.loads(jsonstr)
         tradetype = TradeType[mydict['tradetype']]
-        price = mydict['price']
         amount = mydict['amount']
-        fee = mydict['fee']
+        limitprice = mydict['limitprice']
+        stopprice = mydict['stopprice']
         ordertype = OrderType[mydict['ordertype']]
+        fee = mydict['fee']
+        limittrailpercent = mydict['limittrailpercent']
+        stoptrailpercent = mydict['stoptrailpercent']
 
-        myto = TradeOrder(tradetype=tradetype, amount=amount, price=price, ordertype=ordertype, fee=fee)
+        myto = TradeOrder(tradetype=tradetype, amount=amount, limitprice=limitprice, stopprice=stopprice, 
+                          ordertype=ordertype, fee=fee, limittrailpercent=limittrailpercent, stoptrailpercent=stoptrailpercent)
         return myto
 
 
