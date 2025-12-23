@@ -35,13 +35,13 @@ class TradeOrder:
         self.ordertype = ordertype
         self.fee=fee
         self.limittrailpercent = limittrailpercent
-        self.stoptrailoercent = stoptrailpercent
+        self.stoptrailpercent = stoptrailpercent
 
     def __str__(self):
         return self.getjson()
     def getjson(self):
-        mydict = {'tradetype':self.tradetype.name, 'amount':self.amount, 'limitprice':self.limitPrice,
-                  'stopprice':self.StopPrie, 'ordertype':self.ordertype.name, 'fee':self.fee,
+        mydict = {'tradetype':self.tradetype.name, 'amount':self.amount, 'limitprice':self.limitprice,
+                  'stopprice':self.stopprice, 'ordertype':self.ordertype.name, 'fee':self.fee,
                   'limittrailpercent':self.limittrailpercent, 'stoptrailpercent':self.stoptrailpercent}
         return json.dumps(mydict)
     def fromjson(jsonstr):
@@ -196,12 +196,12 @@ class util:
     def setasset(self, assetname, amount, simid=None):
         amount = self.getasset(assetname, simid)
         if(amount is None):
-            self.runinsert("INSERT INTO simasset (exchangesimid, assettype, assetamount) VALUES(?,?,?)")
+            self.runinsert("INSERT INTO simasset (exchangesimid, assettype, assetamount) VALUES(?,?,?)",(simid, assetname, amount))
         else: 
-            self.runupdate("UPDATE simasset SET assetamount=? WHERE assettype=? AND exchangesimid=?")
+            self.runupdate("UPDATE simasset SET assetamount=? WHERE assettype=? AND exchangesimid=?",(amount, assetname, simid))
 
     def getasset(self, assetname, simid=None):
-        assetentry = self.runselect("SELECT * FROM simasset WHERE assettype=? and exchangesimid=? LIMIT 1")
+        assetentry = self.runselect("SELECT * FROM simasset WHERE assettype=? and exchangesimid=? LIMIT 1",(assetname, simid))
         if len(assetentry) > 0:
             return assetentry[0]['assetamount']
         else:
@@ -287,6 +287,19 @@ class util:
             except:
                 pass
         return res
+
+    def simlog(self, simid:int, newlog:str):
+        print(newlog)
+        succ = 0
+        try:
+            succ = self.runupdate("UPDATE exchangesim SET log = log || ? WHERE id=?;", (newlog, simid))
+        except:
+            print("FAILED TO UPATE SIM LOG(ERROR)")
+        if succ == 0:
+            print("FAILED TO UPATE SIM LOG(NO SIM ID)")
+            return False
+        return True
+
 
     def getclient(self):
         if(self.client is None):

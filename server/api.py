@@ -69,8 +69,8 @@ async def fetchsim(session: str = Depends(require_session),
     if(len(simidres) < 1):
         raise HTTPException(status_code=400, detail="bad request")
     simidres = simidres[0]
-
-    candles = autil.gethistoricledata(simidres['granularity'], simidres['pair'], simidres['start'], simidres['stop'])
+    pair = simidres['pair'].upper()+'-PERP-INTX'
+    candles = autil.gethistoricledata(simidres['granularity'], pair, simidres['start'], simidres['stop'])
     simevents = autil.runselect("SELECT * FROM simevent WHERE exchangesimid=?", (simid,))
     #i = 0
     #for candle in candles:
@@ -86,7 +86,7 @@ async def fetchsim(session: str = Depends(require_session),
         siminddata = autil.runselect("SELECT time, indval AS value FROM simindicator WHERE exchangesimid=? AND indname=? AND indval IS NOT NULL ORDER BY time", (simid,name))
         simindicators[name] = siminddata
     simassets = autil.runselect("SELECT * FROM simasset WHERE exchangesimid=?", (simid,))
-    response = JSONResponse({'candles':candles, 'assets': simassets, 'indicators':simindicators, 'events':simevents})
+    response = JSONResponse({'candles':candles, 'assets': simassets, 'indicators':simindicators, 'events':simevents, 'log':simidres['log']})
     return response
 
 @router.post("/startsim")

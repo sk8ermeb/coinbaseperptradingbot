@@ -40,6 +40,8 @@ async function runScript() {
         const simassets = data['assets']
         const events = data['events']
         const indicators = data['indicators']
+        const simlog = data['log']
+        document.getElementById('simlog').textContent = simlog;
         clearseries()
         setseries(candles);
         addindicators(indicators);

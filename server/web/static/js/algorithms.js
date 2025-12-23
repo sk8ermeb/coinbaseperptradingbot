@@ -1,7 +1,7 @@
 
 const defscript = 
 `#Put Your Code Here
-pair='BTC-PERP-INTX'
+pair='btc'
 granularity='ONE_HOUR'
 def indicators():
   sma_5 = talib.SMA(closes, timeperiod=10)
@@ -14,7 +14,7 @@ def tick():
   if(diff is nan):
     return []
   if(diff > 0.01):
-    return [TradeOrder(tradetype=TradeType.EnterLong, amount=100, price=90000)]
+    return [TradeOrder(tradetype=TradeType.EnterLong, amount=100, limitprice=90000)]
   return []
 `;
 async function handleScriptSelect(select) {
