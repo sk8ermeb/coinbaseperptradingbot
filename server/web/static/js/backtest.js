@@ -4,7 +4,15 @@ let markersPrimitive;
 let picker1;
 let picker2;
 let chartindicators = {}
+let candleslist = [];
 let colors = ['#FF11FF', '#11FFFF', '#FFFF11', '#1111FF', '#11FF11', '#FF1111', '#FFFFFF', '#777777', '#77FF11' ]
+let initcandles = [
+      { timestamp: '2025-01-01', open: 100, high: 110, low: 95,  close: 108 },
+      { timestamp: '2025-01-02', open: 108, high: 115, low: 105, close: 112 },
+      { timestamp: '2025-01-03', open: 112, high: 118, low: 108, close: 110 },
+      // add more...
+    ];
+
 
 async function runScript() {
   const select = document.getElementById('scriptDropdown');
@@ -112,14 +120,34 @@ function clearseries(){
 }
 function setseries(candles){
   let bars = [];
+  candleslist = candles;
   for (const candle of candles) {
     bars.push({ time: candle['timestamp'], open: candle['open'], high: candle['high'], low: candle['low'], close: candle['close'] });
   }
   candleSeries.setData(bars);
 }
 function addcandle(candle){
+  candleSeries.update(candle);
+}
 
-candleSeries.update(candle);
+function chartmouseposition(param)
+{
+  if(param.time === undefined){
+    return;
+  }
+  let hout = '';
+  hoveredtime = new Date(param.time);
+  for (const candle of candleslist) {
+    myts = new Date(candle['timestamp']);
+    if (myts.getTime() === hoveredtime.getTime()){
+      hout += "<b>Candle</b></br>Time:"+myts.toISOString()+
+        "</br>Open:"+candle['open']+
+        "</br>Close:"+candle['close']+
+        "</br>High:"+candle['high']+
+        "</br>Low"+candle['low'];
+    }
+  } 
+  document.getElementById('eventsout').innerHTML = hout;
 }
 
 chart = LightweightCharts.createChart(document.getElementById('chart'), {
@@ -155,14 +183,7 @@ chart = LightweightCharts.createChart(document.getElementById('chart'), {
     wickUpColor: '#26a69a',
     wickDownColor: '#ef5350',
   });
-candleSeries.setData([
-      { time: '2025-01-01', open: 100, high: 110, low: 95,  close: 108 },
-      { time: '2025-01-02', open: 108, high: 115, low: 105, close: 112 },
-      { time: '2025-01-03', open: 112, high: 118, low: 108, close: 110 },
-      // add more...
-    ]);
   markersPrimitive = LightweightCharts.createSeriesMarkers(candleSeries, []);
-  //candleSeries.setData([/* your data */]);
   chart.timeScale().fitContent();
 
 picker2 = new tempusDominus.TempusDominus(document.getElementById('datetimepicker2'), {
@@ -173,6 +194,9 @@ picker2 = new tempusDominus.TempusDominus(document.getElementById('datetimepicke
     components: { clock: true, hours: true, minutes: true}
   }
 });
+chart.subscribeCrosshairMove(chartmouseposition);
+
+setseries(initcandles);
 
 picker1 = new tempusDominus.TempusDominus(document.getElementById('datetimepicker1'), {
   defaultDate: new Date(new Date().getFullYear(), new Date().getMonth(), new Date().getDate() - 2),

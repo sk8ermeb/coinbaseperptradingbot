@@ -70,7 +70,18 @@
 
 <div class="tab-content">
   <div class="tab-pane active" id="charttab">
-    <div id="chart" class="shadow-sm border border-7 border-secondary rounded-4 p-2 m-3" style="width: calc(100vw - 40px); height: calc(100vh - 200px); background:#1a1a1a;"></div>
+    <div class="container-fluid" style="overflow: hidden;">
+      <div class="d-flex flex-column flex-md-row flex-nowrap">
+        <div class="flex-grow-1 order-md-1" style="min-width: 0;">
+          <div id="chart" class="shadow-sm border border-7 border-secondary rounded-4 p-2 m-3"
+             style="height: calc(100vh - 200px); background:#1a1a1a;">
+          </div>
+        </div>
+        <div class="flex-md-shrink-0 order-md-2" style="width: 300px;">
+          <div id="eventsout">Events Text</div>
+        </div>
+      </div>
+    </div>
   </div>
   <div class="tab-pane" id="statstab">
     <div id="simlog"></div>
