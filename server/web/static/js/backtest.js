@@ -81,7 +81,7 @@ function setevents(events){
   let markers = []
   eventlist = events
   for(const myev of events){
-    console.log(myev['eventtype']);
+    //console.log(myev['eventtype']);
     let Color = '';
     let Shape = '';
     if(myev['eventtype'].startsWith('user'))

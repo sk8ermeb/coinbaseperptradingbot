@@ -196,7 +196,10 @@ class Simulation:
                 stoptrailpercent = float(position['stoptrailpercent'])
                 positionid = position['id']
                 tradetype = position['tradetype']
-
+                crypt = 0
+                fee = 0
+                usd = 0
+                filled = False
                 if ordertype == util.OrderType.Limit.name or ordertype == util.OrderType.Bracket.name:
                     if side == 'buy':
                         if tradetype == util.TradeType.EnterLong.name:
@@ -207,10 +210,7 @@ class Simulation:
                                 self.namespace[pair] += crypt
                                 sutil.simlog(self.simid, "Enter Long Limit order filled! "+positionid)
                                 positionsfilled.append(position)
-                                eventdata = {'ordertype':ordertype, 'price':limitprice, 'fee':fee, 'cryptodiff':crypt, 'usddiff':amount, 
-                                             'usdcurr':self.namespace['usd'], 'cryptcurr':self.namespace[pair]}
-                                sutil.runinsert("INSERT INTO simevent (exchangesimid, candleid, eventtype, eventdata, fee, metadata, time) VALUES(?,?,?,?,?,?,?)",
-                                                (self.simid, candle['id'], 'fill:'+str(tradetype)+':'+ordertype, json.dumps(eventdata), fee, "", candle['timestamp']))
+                                filled = True
                             else:
                                 pass
                         elif tradetype == util.TradeType.ExitLong.name:
@@ -222,6 +222,7 @@ class Simulation:
                                 self.namespace[pair] -= crypt
                                 sutil.simlog(self.simid, "Exit Long Limit order filled! "+positionid)
                                 positionsfilled.append(position)
+                                filled = True
                             else:
                                 #price did not hit limit
                                 pass
@@ -234,6 +235,7 @@ class Simulation:
                                 self.namespace[pair] += crypt
                                 sutil.simlog(self.simid, "Enter Short Limit order filled! "+positionid)
                                 positionsfilled.append(position)
+                                filled = True
                             else:
                                 #price did not hit limit
                                 pass
@@ -246,10 +248,16 @@ class Simulation:
                                 self.namespace[pair] -= crypt
                                 sutil.simlog(self.simid, "Exit Short Limit order filled! "+positionid)
                                 positionsfilled.append(position)
+                                filled = True
                             else:
                                 #price did not hit limit
                                 pass
-
+                    if(filled):
+                        eventdata = {'ordertype':ordertype, 'price':limitprice, 'fee':fee, 'cryptodiff':crypt, 'usddiff':amount, 
+                                     'usdcurr':self.namespace['usd'], 'cryptcurr':self.namespace[pair]}
+                        sutil.runinsert("INSERT INTO simevent (exchangesimid, candleid, eventtype, eventdata, fee, metadata, time) VALUES(?,?,?,?,?,?,?)",
+                                        (self.simid, candle['id'], 'fill:'+str(tradetype)+':'+ordertype, json.dumps(eventdata), fee, "", candle['timestamp']))
+                    filled = False 
                 if ordertype == util.OrderType.Stop.name or ordertype == util.OrderType.Bracket.name:
                     if side == 'buy':
                         if tradetype == util.TradeType.EnterLong.name:
@@ -260,6 +268,7 @@ class Simulation:
                                 self.namespace[pair] += crypt
                                 sutil.simlog(self.simid, "Enter Long Stop order filled! "+positionid)
                                 positionsfilled.append(position)
+                                filled = True
                             else:
                                 #price did not hit stop
                                 pass
@@ -272,6 +281,7 @@ class Simulation:
                                 self.namespace[pair] -= crypt
                                 sutil.simlog(self.simid, "Exit Long Stop order filled! "+positionid)
                                 positionsfilled.append(position)
+                                filled = True
                             else:
                                 #price did not hit limit
                                 pass
@@ -284,6 +294,7 @@ class Simulation:
                                 self.namespace[pair] += crypt
                                 sutil.simlog(self.simid, "Enter Short Stop order filled! "+positionid)
                                 positionsfilled.append(position)
+                                filled = True
                             else:
                                 #price did not hit limit
                                 pass
@@ -296,9 +307,15 @@ class Simulation:
                                 self.namespace[pair] -= crypt
                                 sutil.simlog(self.simid, "Exit Short Stop order filled! "+positionid)
                                 positionsfilled.append(position)
+                                filled = True
                             else:
                                 pass
                                 #price did not hit limit
+                    if(filled):
+                        eventdata = {'ordertype':ordertype, 'price':stopprice, 'fee':fee, 'cryptodiff':crypt, 'usddiff':amount, 
+                                     'usdcurr':self.namespace['usd'], 'cryptcurr':self.namespace[pair]}
+                        sutil.runinsert("INSERT INTO simevent (exchangesimid, candleid, eventtype, eventdata, fee, metadata, time) VALUES(?,?,?,?,?,?,?)",
+                                        (self.simid, candle['id'], 'fill:'+str(tradetype)+':'+ordertype, json.dumps(eventdata), fee, "", candle['timestamp']))
             for positionfilled in positionsfilled:
                 for position in positions:
                     if(positionfilled['id'] == position['id']):
@@ -318,6 +335,7 @@ class Simulation:
                 ordertype = util.OrderType.NoOrder
                 price = 0.0
                 side = 'buy'
+                create = False
                 if event.tradetype == util.TradeType.EnterLong:
                     side = 'buy'
                     if len(positions)>=maxpos:
@@ -337,10 +355,6 @@ class Simulation:
                         if limitprice < close:
                             ordertype = util.OrderType.Limit
                             sutil.simlog(self.simid, "Price above limit price entering a limit long")
-                            eventdata = {'ordertype':ordertype.name, 'limitprice':limitprice, 'stopprice':stopprice, 'fee':0, 'amount':amount, 
-                                         'usdcurr':self.namespace['usd'], 'cryptcurr':self.namespace[pair]}
-                            sutil.runinsert("INSERT INTO simevent (exchangesimid, candleid, eventtype, eventdata, fee, metadata, time) VALUES(?,?,?,?,?,?,?)",
-                                            (self.simid, candle['id'], 'create:'+str(event.tradetype.name)+':'+ordertype.name, json.dumps(eventdata), fee, "", candle['timestamp']))
                         elif limitprice >= close:
                             ordertype = util.OrderType.Market
                             price = close
@@ -489,9 +503,16 @@ class Simulation:
                 positions.append({'ordertype':ordertype.name, 'price':price, 'amount':amount, 'side':side, 
                                   'stopprice':stopprice, 'limitprice':limitprice, 'limittrailpercent':limittrailpercent,
                                   'stoptrailpercent':stoptrailpercent, 'id':str(uuid.uuid4()), 'tradetype':event.tradetype.name})
+                eventdata = {'ordertype':ordertype.name, 'limitprice':limitprice, 'stopprice':stopprice, 'price':price, 'fee':0, 'amount':amount, 
+                             'usdcurr':self.namespace['usd'], 'cryptcurr':self.namespace[pair]}
+                sutil.runinsert("INSERT INTO simevent (exchangesimid, candleid, eventtype, eventdata, fee, metadata, time) VALUES(?,?,?,?,?,?,?)",
+                                (self.simid, candle['id'], 'create:'+str(event.tradetype.name)+':'+ordertype.name, json.dumps(eventdata), fee, "", candle['timestamp']))
                 
                 def checkmarketorders(position):
                     if position['ordertype'] == util.OrderType.Market.name:
+                        usd = 0
+                        crypt = 0
+                        fee = 0
                         if position['side'] == 'buy':
                             if position['tradetype'] == util.TradeType.EnterLong.name:
                                 crypt = ((1-makerfee)*position['amount'])/candle['close']
@@ -516,6 +537,10 @@ class Simulation:
                                 usd = usd*(1-makerfee)
                                 self.namespace['usd'] += position['amount']
                                 self.namespace[pair] -= crypt
+                        eventdata = {'ordertype':position['ordertype'], 'price':candle['close'], 'fee':fee, 'amount':position['amount'], 
+                                     'usd':usd, 'crypt':crypt, 'usdcurr':self.namespace['usd'], 'cryptcurr':self.namespace[pair]}
+                        sutil.runinsert("INSERT INTO simevent (exchangesimid, candleid, eventtype, eventdata, fee, metadata, time) VALUES(?,?,?,?,?,?,?)",
+                                        (self.simid, candle['id'], 'fill:'+str(event.tradetype.name)+':'+ordertype.name, json.dumps(eventdata), fee, "", candle['timestamp']))
                         return True
 
                     return False
