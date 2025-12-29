@@ -166,7 +166,7 @@ class Simulation:
                 events = self.namespace['tick']()
                 for event in events:
                     sutil.runinsert("INSERT INTO simevent (exchangesimid, candleid, eventtype, eventdata, fee, metadata, time) VALUES(?,?,?,?,?,?,?)",
-                                    (self.simid, candle['id'], str(event.tradetype), str(event), 0.0, "", candle['timestamp']))
+                                    (self.simid, candle['id'], 'user:'+str(event.tradetype.name), str(event), 0.0, "", candle['timestamp']))
             except Exception as e:
                 error = str(traceback.format_exc().splitlines()[-2:])
                 sutil.runupdate("UPDATE exchangesim SET log=?, status=? WHERE id=?", (error, -1, self.simid))
@@ -207,6 +207,10 @@ class Simulation:
                                 self.namespace[pair] += crypt
                                 sutil.simlog(self.simid, "Enter Long Limit order filled! "+positionid)
                                 positionsfilled.append(position)
+                                eventdata = {'ordertype':ordertype, 'price':limitprice, 'fee':fee, 'cryptodiff':crypt, 'usddiff':amount, 
+                                             'usdcurr':self.namespace['usd'], 'cryptcurr':self.namespace[pair]}
+                                sutil.runinsert("INSERT INTO simevent (exchangesimid, candleid, eventtype, eventdata, fee, metadata, time) VALUES(?,?,?,?,?,?,?)",
+                                                (self.simid, candle['id'], 'fill:'+str(tradetype)+':'+ordertype, json.dumps(eventdata), fee, "", candle['timestamp']))
                             else:
                                 pass
                         elif tradetype == util.TradeType.ExitLong.name:
@@ -333,6 +337,10 @@ class Simulation:
                         if limitprice < close:
                             ordertype = util.OrderType.Limit
                             sutil.simlog(self.simid, "Price above limit price entering a limit long")
+                            eventdata = {'ordertype':ordertype.name, 'limitprice':limitprice, 'stopprice':stopprice, 'fee':0, 'amount':amount, 
+                                         'usdcurr':self.namespace['usd'], 'cryptcurr':self.namespace[pair]}
+                            sutil.runinsert("INSERT INTO simevent (exchangesimid, candleid, eventtype, eventdata, fee, metadata, time) VALUES(?,?,?,?,?,?,?)",
+                                            (self.simid, candle['id'], 'create:'+str(event.tradetype.name)+':'+ordertype.name, json.dumps(eventdata), fee, "", candle['timestamp']))
                         elif limitprice >= close:
                             ordertype = util.OrderType.Market
                             price = close

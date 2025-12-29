@@ -1,3 +1,4 @@
+
 let candleSeries;
 let chart;
 let markersPrimitive;
@@ -5,14 +6,14 @@ let picker1;
 let picker2;
 let chartindicators = {}
 let candleslist = [];
-let colors = ['#FF11FF', '#11FFFF', '#FFFF11', '#1111FF', '#11FF11', '#FF1111', '#FFFFFF', '#777777', '#77FF11' ]
+let eventlist = [];
+let colors = ['#FF11FF', '#11FFFF', '#FFFF11', '#AAAAFF', '#AAFFAA', '#FFAAAA', '#FFFFFF', '#AAAAAA', '#AAFF11' ]
 let initcandles = [
-      { timestamp: '2025-01-01', open: 100, high: 110, low: 95,  close: 108 },
-      { timestamp: '2025-01-02', open: 108, high: 115, low: 105, close: 112 },
-      { timestamp: '2025-01-03', open: 112, high: 118, low: 108, close: 110 },
+      { timestamp: 1766656800, open: 100, high: 110, low: 95,  close: 108 },
+      { timestamp: 1766660400, open: 108, high: 115, low: 105, close: 112 },
+      { timestamp: 1766664000, open: 112, high: 118, low: 108, close: 110 },
       // add more...
     ];
-
 
 async function runScript() {
   const select = document.getElementById('scriptDropdown');
@@ -78,34 +79,46 @@ async function runScript() {
 
 function setevents(events){
   let markers = []
+  eventlist = events
   for(const myev of events){
+    console.log(myev['eventtype']);
     let Color = '';
     let Shape = '';
+    if(myev['eventtype'].startsWith('user'))
+    {
+      Color = colors[3];
+    }
+    else if(myev['eventtype'].startsWith('fill')){
+      Color = colors[4];
+    }
+    else if(myev['eventtype'].startsWith('create')){
+      Color = colors[5];
+    }
+    else{
+      Color = colors[6];
+    }
+
     if(myev['eventtype'].includes('EnterLong'))
     {
-      Color = colors[5];
       Shape = 'arrowUp';
     }
     else if(myev['eventtype'].includes('EnterShort'))
     {
-      Color = colors[6];
       Shape = 'arrowDown';
     }
     else if(myev['eventtype'].includes('ExitLong'))
     {
-      Color = colors[7];
       Shape = 'square';
     }
     else if(myev['eventtype'].includes('ExitShort'))
     {
-      Color = colors[8];
-      Shape = 'square';
+      Shape = 'circle';
     }
     else{
       Color = colors[4];
       Shape = 'square';
     }
-    markers.push({time: myev['time'], position: 'aboveBar', color:Color, shape:Shape, text:myev['eventdata']})
+    markers.push({time: myev['time'], position: 'aboveBar', color:Color, shape:Shape, text:myev['eventtype']})
   }
   markersPrimitive.setMarkers(markers);
 }
@@ -132,21 +145,43 @@ function addcandle(candle){
 
 function chartmouseposition(param)
 {
+  //on some browsers, adding in this console logs makes it actually work real time instead of when you click
+  //console.log('1');
   if(param.time === undefined){
     return;
   }
   let hout = '';
-  hoveredtime = new Date(param.time);
+  hoveredtime = new Date(param.time * 1000);
   for (const candle of candleslist) {
-    myts = new Date(candle['timestamp']);
+    myts = new Date(candle['timestamp'] * 1000);
     if (myts.getTime() === hoveredtime.getTime()){
-      hout += "<b>Candle</b></br>Time:"+myts.toISOString()+
-        "</br>Open:"+candle['open']+
+      const isostr = myts.toLocaleString('en-US', {
+        year: 'numeric',
+        month: 'numeric',
+        day: 'numeric',
+        hour: 'numeric',
+        minute: '2-digit',
+        hour12: true
+      }).replace(',', '');
+      hout += "<b>Candle</b></br>Time:"+isostr+
+        "</br>Open: "+candle['open']+
         "</br>Close:"+candle['close']+
-        "</br>High:"+candle['high']+
-        "</br>Low"+candle['low'];
+        "</br>High: "+candle['high']+
+        "</br>Low:  "+candle['low'];
     }
-  } 
+  }
+  hout +="</br>";
+  for (const cevent of eventlist){
+    myts = new Date(cevent['time'] * 1000);
+    //console.log(myts);
+    if (myts.getTime() === hoveredtime.getTime()){
+      hout += "---<b>"+cevent['eventtype']+"</b>---</br>"; 
+      cdata = JSON.parse(cevent['eventdata']);
+      for (const [key, value] of Object.entries(cdata)) {
+        hout += key+": "+value+"</br>"; 
+      }
+    }
+  }
   document.getElementById('eventsout').innerHTML = hout;
 }
 
