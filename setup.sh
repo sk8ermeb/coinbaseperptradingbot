@@ -1,6 +1,15 @@
 #!/bin/bash
 
-python3.13 --version >/dev/null 2>&1 && echo "Found Python version 3.13. Continuing" || { echo "Missing python version 3.13"; exit 1; }
+if python3.13 --version >/dev/null 2>&1; then
+    PY_CMD="python3.13"
+    echo "Found Python version 3.13. Continuing"
+elif python --version 2>&1 | grep -q "3\.13"; then
+    PY_CMD="python"
+    echo "Found Python version 3.13. Continuing"
+else
+    echo "Missing python version 3.13"
+    exit 1
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
@@ -11,7 +20,7 @@ if [ -d "venv" ]; then
     
 else
     echo "Python venv folder missing, creating"
-    python3.13 -m venv "venv" || { echo "Failed to create venv. Exiting. Check Permission"; exit 1; }
+    $PY_CMD -m venv "venv" || { echo "Failed to create venv. Exiting. Check Permission"; exit 1; }
     echo "Activiating new venv"
     source "venv/bin/activate"
 fi

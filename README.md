@@ -4,14 +4,15 @@ NOT READY
 A way to build a trading algorithm for coin base perpetual futures with backtesting
 
 # Requirements
-Should run on any OS. Must have python3.13 in your path. python3.13 --version
+Should run on any OS. Must have python3.13 in your path. python3.13 --version or python --version
 I am just one guy so I don't want to spend the time to version test accross different
 dependencies. But most are pretty generic and should work on older pythons. 
 # Install
 ## Linux/MacOS
 ./setup.sh
 ## Windows
-git bash setup.sh
+open up a git bash window (it comes with git on windows). Navigate to the repo and 
+run ./setup.sh
 
 # Use case
 Open a browser and go 127.0.0.1:8080

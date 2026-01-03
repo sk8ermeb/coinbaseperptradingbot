@@ -101,7 +101,9 @@ class util:
         if cls._instance is None:
             cls._instance = super().__new__(cls)
             path = os.path.dirname(os.path.abspath(__file__))
-            cls._sqlfile = os.path.join(path, 'data', 'db.sqlite')
+            cls._sqlfile = os.path.join(path, 'data')
+            os.makedirs(cls._sqlfile, exist_ok=True)
+            cls._sqlfile = os.path.join(path, 'db.sqlite')
             conn = sqlite3.connect(cls._sqlfile)
             cur = conn.cursor()
             cur.execute("""CREATE TABLE IF NOT EXISTS users (
