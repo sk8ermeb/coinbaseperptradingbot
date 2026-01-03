@@ -50,7 +50,7 @@ async function runScript() {
         const events = data['events']
         const indicators = data['indicators']
         const simlog = data['log']
-        document.getElementById('simlog').textContent = simlog;
+        document.getElementById('simlog').innerHTML = simlog;
         clearseries()
         setseries(candles);
         addindicators(indicators);
@@ -259,3 +259,4 @@ function addindicators(indicators){
     }
   }
 }
+document.getElementById('simlog').innerHTML = "Log<br>Files";

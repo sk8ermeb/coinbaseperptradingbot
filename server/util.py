@@ -293,6 +293,7 @@ class util:
     def simlog(self, simid:int, newlog:str):
         print(newlog)
         succ = 0
+        newlog = newlog+"<br>";
         try:
             succ = self.runupdate("UPDATE exchangesim SET log = log || ? WHERE id=?;", (newlog, simid))
         except:
