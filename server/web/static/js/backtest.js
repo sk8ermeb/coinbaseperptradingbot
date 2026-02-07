@@ -24,11 +24,11 @@ async function runScript() {
     document.getElementById('bstartsim').classList.add('d-none');
     if (!picker1 || picker1.dates.picked.length === 0) return null;
     let dt1 = picker1.dates.picked[0];
-    let start = Date.UTC(dt1.year, dt1.month, dt1.date, dt1.hours, dt1.minutes)/1000;
-    //const start = Math.floor(dt.toJSDate().getTime() / 1000);
-    //const start = picker1.dates.picked[0].toUnixInteger();
+    //let start = Date.UTC(dt1.year, dt1.month, dt1.date, dt1.hours, dt1.minutes)/1000;
     let dt2 = picker2.dates.picked[0];
-    let stop = Date.UTC(dt2.year, dt2.month, dt2.date, dt2.hours, dt2.minutes)/1000;
+    //let stop = Date.UTC(dt2.year, dt2.month, dt2.date, dt2.hours, dt2.minutes)/1000;
+    let start = Math.floor(picker1.dates.picked[0].getTime() / 1000);
+    let stop = Math.floor(picker2.dates.picked[0].getTime() / 1000);
     const response = await fetch('/api/startsim', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -221,8 +221,13 @@ chart = LightweightCharts.createChart(document.getElementById('chart'), {
   markersPrimitive = LightweightCharts.createSeriesMarkers(candleSeries, []);
   chart.timeScale().fitContent();
 
+var dt1 = document.getElementById('dt1hid').dataset.hidden;
+var dt2 = document.getElementById('dt2hid').dataset.hidden;
+let start = new Date(dt1.year, dt1.month, dt1.date, dt1.hours, dt1.minutes).getTime() / 1000;
+let stop = new Date(dt2.year, dt2.month, dt2.date, dt2.hours, dt2.minutes).getTime() / 1000;
 picker2 = new tempusDominus.TempusDominus(document.getElementById('datetimepicker2'), {
-  defaultDate: new Date(new Date().getFullYear(), new Date().getMonth(), new Date().getDate() - 1),
+  //defaultDate: new Date(new Date().getFullYear(), new Date().getMonth(), new Date().getDate() - 1),
+  defaultDate: new Date(parseInt(dt2) * 1000),
   useCurrent: false,           // ← stops jumping to today
   display: {
     icons: { time: 'bi bi-clock', date: 'bi bi-calendar', up: 'bi bi-arrow-up', down: 'bi bi-arrow-down' },
@@ -234,7 +239,8 @@ chart.subscribeCrosshairMove(chartmouseposition);
 setseries(initcandles);
 
 picker1 = new tempusDominus.TempusDominus(document.getElementById('datetimepicker1'), {
-  defaultDate: new Date(new Date().getFullYear(), new Date().getMonth(), new Date().getDate() - 2),
+  //defaultDate: new Date(new Date().getFullYear(), new Date().getMonth(), new Date().getDate() - 2),
+  defaultDate: new Date(parseInt(dt1) * 1000),
   useCurrent: false,           // ← stops jumping to today
   display: {
     icons: { time: 'bi bi-clock', date: 'bi bi-calendar', up: 'bi bi-arrow-up', down: 'bi bi-arrow-down' },

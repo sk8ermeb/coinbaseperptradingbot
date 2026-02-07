@@ -3,6 +3,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 import os
+from datetime import datetime, timedelta
 from api import router
 from fastapi import Request, Response
 from fastapi.templating import Jinja2Templates
@@ -71,6 +72,14 @@ async def root(request: Request):
     res = myutil.runselect("SELECT * FROM scripts", ())
     if(len(res) > 0):
         resp['scripts'] = res
+    start = myutil.getkeyval('simstartdt')
+    stop = myutil.getkeyval('simstopdt')
+    if(start is None):
+        start = int((datetime.now() - timedelta(days=1)).replace(minute=0, second=0, microsecond=0).timestamp())
+    if(stop is None):
+        stop = int(datetime.now().replace(minute=0, second=0, microsecond=0).timestamp())
+    resp['simstop'] = stop
+    resp['simstart'] = start
     return templates.TemplateResponse(
         "backtest.html", resp
     )

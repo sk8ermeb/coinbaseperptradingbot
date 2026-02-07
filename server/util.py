@@ -96,14 +96,16 @@ class util:
     lock = Lock()
     client = None
     granularities = {'ONE_MINUTE':60, 'FIVE_MINUTE':300, 'FIFTEEN_MINUTE':900, 'ONE_HOUR':3600, 'SIX_HOUR':21600, 'ONE_DAY':86400}
-
+    SimID = None
+    TickTime = None
+    
     def __new__(cls, *args, **kwargs):
         if cls._instance is None:
             cls._instance = super().__new__(cls)
             path = os.path.dirname(os.path.abspath(__file__))
             cls._sqlfile = os.path.join(path, 'data')
             os.makedirs(cls._sqlfile, exist_ok=True)
-            cls._sqlfile = os.path.join(path, 'db.sqlite')
+            cls._sqlfile = os.path.join(cls._sqlfile, 'db.sqlite')
             conn = sqlite3.connect(cls._sqlfile)
             cur = conn.cursor()
             cur.execute("""CREATE TABLE IF NOT EXISTS users (
@@ -290,12 +292,12 @@ class util:
                 pass
         return res
 
-    def simlog(self, simid:int, newlog:str):
+    def simlog(self, newlog:str):
         print(newlog)
         succ = 0
-        newlog = newlog+"<br>";
+        newlog = self.TickTime+":"+newlog+"<br>";
         try:
-            succ = self.runupdate("UPDATE exchangesim SET log = log || ? WHERE id=?;", (newlog, simid))
+            succ = self.runupdate("UPDATE exchangesim SET log = log || ? WHERE id=?;", (newlog, self.SimID))
         except:
             print("FAILED TO UPATE SIM LOG(ERROR)")
         if succ == 0:

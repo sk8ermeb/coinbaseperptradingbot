@@ -109,6 +109,8 @@ async def savesetting(session: str = Depends(require_session),
     simid = mysim.simid
     rungood = mysim.runsim()
     if(mysim.good and rungood):
+        autil.setkeyval('simstartdt', start)
+        autil.setkeyval('simstopdt', stop)
         response = JSONResponse({"simid": simid})
         return response
     else:

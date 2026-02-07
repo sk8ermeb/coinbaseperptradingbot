@@ -8,19 +8,7 @@ import traceback
 from enum import Enum
 sutil = util.util()
 import uuid
-#client = sutil.getclient()
-
-
-#product_id = "BTC-USD"
-#start = int(datetime(2025, 7, 21).timestamp())
-#end = int(datetime(2025, 7, 22).timestamp())
-#granularity = "ONE_HOUR"
-
-#candles = gethistoricledata(granularity, product_id, start, end)
-#sutil.runupdate("DELETE FROM candle;",())
-
-#Market order, Limit order, Stop-limit order, Bracket order, Take Profit/Stop Loss order, TWAP order
-
+from datetime import datetime
 
 
 class Simulation:
@@ -60,11 +48,13 @@ class Simulation:
         self.namespace['maxpositions'] = 1
         self.namespace['pendingpositions'] = []
         self.namespace['realposition'] = 0.0
-        self.namespace['makerfee'] = 0.0003
-        self.namespace['takerfee'] = 0.0001
+        self.namespace['costbasis'] = 0.0
+        self.namespace['realspend'] = 0.0
+        self.namespace['makerfee'] = 0.000
+        self.namespace['takerfee'] = 0.0003
         self.namespace['usd'] = 10000.00
-        self.namespace['btc'] = 0
-        self.namespace['eth'] = 0
+        #self.namespace['btc'] = 0
+        #self.namespace['eth'] = 0
         self.namespace['fee'] = 0
         self.historysize = 100
         error = ""
@@ -88,8 +78,22 @@ class Simulation:
         sutil.setkeyval('simid', self.simid)
         if(not self.good):
             sutil.runupdate("UPDATE exchangesim SET log=?, status=? WHERE id=?", (error, -1, self.simid))
+        sutil.SimID = self.simid
+        #sutil.setasset('USD', 10000.00, self.simid)
 
-        sutil.setasset('USD', 10000.00, self.simid)
+        self._SimUSDStart =self.namespace['usd']
+        self._SimUSDEnd =self.namespace['usd']
+        self._SimTrades =0
+        self._SimEntries =0
+        self._SimExits =0
+        self._SimMarkets =0
+        self._SimLongs =0
+        self._SimShorts =0
+        self._SimFeeTotal =0
+        self._SimProfTradeCount =0
+        self._SimLossTradeCount =0
+        self._SimTradeList =[]
+        
 
     def cleanarr(self, arr):
         arr= numpy.array(arr, dtype=float)
@@ -97,6 +101,44 @@ class Simulation:
         if(missing > 0):
             arr = numpy.pad(arr, (missing, 0), constant_values=numpy.nan)
         return arr
+
+    def updatecostbasis(self, price, cryptoamount, fee):
+        curramount = self.namespace['realposition']
+        curprice = self.namespace['costbasis']
+        currusd = self.namespace['usd']
+
+        usdvalue = abs(price*cryptoamount)
+        newprice = curprice
+        newamount = curramount
+        newusd = currusd
+        newfee = usdvalue * fee
+
+        if(price == 0 or cryptoamount == 0):
+            pass
+        #increase our position, either short or long. the negatives should work out find in either directiojn
+        elif(cryptoamount > 0 and curramount >= 0) or (cryptoamount < 0 and curramount <= 0):
+            newamount = curramount+cryptoamount
+            newprice = (curramount*curprice + cryptoamount*price)/newamount
+            newusd = currusd - usdvalue - newfee
+        #Decrease our long or short position. Long and Short work the same way, if you bought in at 100 then return is 
+        #110% at 110k long or 90k short
+        elif(cryptoamount < 0 and curramount > 0) or (cryptoamount > 0 and curramount < 0):
+            pricediff = price - curprice
+            if(curramount < 0):
+                pricediff = curprice - price
+            usdvalue = curprice*abs(cryptoamount) + pricediff * abs(cryptoamount)
+            newamount = curramount+cryptoamount
+            newprice = currprice
+            newusd = usdvalue - newfee
+
+        
+        self.namespace['realposition'] = newamount
+        self.namespace['costbasis'] = newprice
+        self.namespace['usd'] = newusd
+        #returns current average price after fill, the total amount of crypto holdings, total usd holdings, total fee
+        #for transaction, and the USD for the transaction
+        return (newprice, newamount, newusd, newfee, usdvalue)
+
 
 
     def processtick(self):
@@ -116,10 +158,13 @@ class Simulation:
         self.namespace['close'] = candle['close']
         self.namespace['volume'] = candle['volume']
         self.namespace['time'] = candle['timestamp']
-
         positions = json.loads(sutil.getkeyval('simpositions'))
         self.namespace['pendingpositions'] = positions
-        
+
+
+        dt = datetime.utcfromtimestamp(self.namespace['time'])
+        ticktime = dt.strftime("%m-%d %I:%M%p")
+        sutil.TickTime = ticktime 
         #Calculate all the user defined indicators. It should always be returned as a list of indicators
         if('indicators' in self.namespace):
             try:
@@ -173,6 +218,7 @@ class Simulation:
                 return False
             #positions = self.namespace['pendingpositions'] 
             realposition = self.namespace['realposition'] 
+            realspend = self.namespace['realspend'] 
             maxpos = self.namespace['maxpositions']
             makerfee = self.namespace['makerfee']
             takerfee = self.namespace['takerfee']
@@ -189,7 +235,7 @@ class Simulation:
                 ordertype = position['ordertype']
                 price = float(position['price'])
                 amount = float(position['amount'])
-                side = position['side']
+                #side = position['side']
                 stopprice = float(position['stopprice'])
                 limitprice = float(position['limitprice'])
                 limittrailpercent = float(position['limittrailpercent'])
@@ -201,119 +247,146 @@ class Simulation:
                 usd = 0
                 filled = False
                 if ordertype == util.OrderType.Limit.name or ordertype == util.OrderType.Bracket.name:
-                    if side == 'buy':
-                        if tradetype == util.TradeType.EnterLong.name:
-                            if low <= limitprice:
-                                crypt = ((1-makerfee)*amount)/limitprice
-                                fee = makerfee*amount
-                                self.namespace['usd'] -= amount
-                                self.namespace[pair] += crypt
-                                sutil.simlog(self.simid, "Enter Long Limit order filled! "+positionid)
-                                positionsfilled.append(position)
-                                filled = True
-                            else:
-                                pass
-                        elif tradetype == util.TradeType.ExitLong.name:
-                            if high >= limitprice:
-                                usd = amount*limitprice
-                                fee = makerfee*usd
-                                usd = usd*(1-makerfee)
-                                self.namespace['usd'] += amount
-                                self.namespace[pair] -= crypt
-                                sutil.simlog(self.simid, "Exit Long Limit order filled! "+positionid)
-                                positionsfilled.append(position)
-                                filled = True
-                            else:
-                                #price did not hit limit
-                                pass
-                    elif side == 'sell':
-                        if tradetype == util.TradeType.EnterShort.name:
-                            if high >= limitprice:
-                                crypt = ((1-makerfee)*amount)/limitprice
-                                fee = makerfee*amount
-                                self.namespace['usd'] -= amount
-                                self.namespace[pair] += crypt
-                                sutil.simlog(self.simid, "Enter Short Limit order filled! "+positionid)
-                                positionsfilled.append(position)
-                                filled = True
-                            else:
-                                #price did not hit limit
-                                pass
-                        elif tradetype == util.TradeType.ExitShort.name:
-                            if low <= limitprice:
-                                usd = amount*limitprice
-                                fee = makerfee*usd
-                                usd = usd*(1-makerfee)
-                                self.namespace['usd'] += amount
-                                self.namespace[pair] -= crypt
-                                sutil.simlog(self.simid, "Exit Short Limit order filled! "+positionid)
-                                positionsfilled.append(position)
-                                filled = True
-                            else:
-                                #price did not hit limit
-                                pass
+                    if tradetype == util.TradeType.EnterLong.name:
+                        if low <= limitprice:
+                            fee = makerfee*amount
+                            crypt = (amount - fee)/limitprice
+                            newprice, newamount, newusd, fee, usd = self.updatecostbasis(limitprice, crypt, makerfee)
+                            sutil.simlog("Enter Long Limit order filled! "+
+                                         f"<br>&nbsp;&nbsp;&nbsp;Id: {positionid}" +
+                                         f"<br>&nbsp;&nbsp;&nbsp;Limit Price:{str(limitprice)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;Maker Fee:{str(makerfee)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;Fee Paid:${str(fee)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;Crypto Change${str(crypt)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;USD Change${str(usd)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;Average Price${str(newprice)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;Crypto Holdings${str(newamount)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;USD Holdings${str(newusd)}")
+                            positionsfilled.append(position)
+                            filled = True
+                        else:
+                            pass
+                    elif tradetype == util.TradeType.ExitLong.name:
+                        if high >= limitprice:
+                            crypt = -amount
+                            newprice, newamount, newusd, fee, usd = self.updatecostbasis(limitprice, crypt, makerfee)
+                            sutil.simlog("Exit Long Limit order filled!"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;Id: {positionid}" +
+                                         f"<br>&nbsp;&nbsp;&nbsp;Limit Price:{str(limitprice)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;Maker Fee:{str(makerfee)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;Fee Paid:${str(fee)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;Crypto Change${str(crypt)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;USD Change${str(usd)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;Average Price${str(newprice)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;Crypto Holdings${str(newamount)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;USD Holdings${str(newusd)}")
+                            positionsfilled.append(position)
+                            filled = True
+                        else:
+                            #price did not hit limit
+                            pass
+                    elif tradetype == util.TradeType.EnterShort.name:
+                        if high >= limitprice:
+                            fee = makerfee*amount
+                            crypt = -(amount - fee)/limitprice
+                            newprice, newamount, newusd, fee, usd = self.updatecostbasis(limitprice, crypt, makerfee)
+                            sutil.simlog("Enter Short Limit order filled!"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;Id: {positionid}" +
+                                         f"<br>&nbsp;&nbsp;&nbsp;Limit Price:{str(limitprice)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;Maker Fee:{str(makerfee)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;Fee Paid:${str(fee)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;Crypto Change${str(crypt)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;USD Change${str(usd)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;Average Price${str(newprice)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;Crypto Holdings${str(newamount)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;USD Holdings${str(newusd)}")
+                            positionsfilled.append(position)
+                            filled = True
+                        else:
+                            #price did not hit limit
+                            pass
+                    elif tradetype == util.TradeType.ExitShort.name:
+                        if low <= limitprice:
+                            crypt = amount
+                            newprice, newamount, newusd, fee, usd = self.updatecostbasis(limitprice, crypt, makerfee)
+                            sutil.simlog("Exit Long Limit order filled!"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;Id: {positionid}" +
+                                         f"<br>&nbsp;&nbsp;&nbsp;Limit Price:{str(limitprice)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;Maker Fee:{str(makerfee)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;Fee Paid:${str(fee)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;Crypto Change${str(crypt)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;USD Change${str(usd)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;Average Price${str(newprice)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;Crypto Holdings${str(newamount)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;USD Holdings${str(newusd)}")
+                            sutil.simlog("Exit Short Limit order filled! "+positionid)
+                            positionsfilled.append(position)
+                            filled = True
+                        else:
+                            #price did not hit limit
+                            pass
                     if(filled):
-                        eventdata = {'ordertype':ordertype, 'price':limitprice, 'fee':fee, 'cryptodiff':crypt, 'usddiff':amount, 
-                                     'usdcurr':self.namespace['usd'], 'cryptcurr':self.namespace[pair]}
+                        eventdata = {'ordertype':ordertype, 'price':limitprice, 'fee':fee, 'cryptodiff':crypt, 'usddiff':usd, 
+                                     'usdcurr':self.namespace['usd'], 'cryptcurr':self.namespace['realposition'], 
+                                     'costbasis':self.namespace['costbasis']}
                         sutil.runinsert("INSERT INTO simevent (exchangesimid, candleid, eventtype, eventdata, fee, metadata, time) VALUES(?,?,?,?,?,?,?)",
                                         (self.simid, candle['id'], 'fill:'+str(tradetype)+':'+ordertype, json.dumps(eventdata), fee, "", candle['timestamp']))
                     filled = False 
                 if ordertype == util.OrderType.Stop.name or ordertype == util.OrderType.Bracket.name:
-                    if side == 'buy':
-                        if tradetype == util.TradeType.EnterLong.name:
-                            if high >= stopprice:
-                                crypt = ((1-makerfee)*amount)/stopprice
-                                fee = makerfee*amount
-                                self.namespace['usd'] -= amount
-                                self.namespace[pair] += crypt
-                                sutil.simlog(self.simid, "Enter Long Stop order filled! "+positionid)
-                                positionsfilled.append(position)
-                                filled = True
-                            else:
-                                #price did not hit stop
-                                pass
-                        elif tradetype == util.TradeType.ExitLong.name:
-                            if low <= stopprice:
-                                usd = amount*stopprice
-                                fee = makerfee*usd
-                                usd = usd*(1-makerfee)
-                                self.namespace['usd'] += amount
-                                self.namespace[pair] -= crypt
-                                sutil.simlog(self.simid, "Exit Long Stop order filled! "+positionid)
-                                positionsfilled.append(position)
-                                filled = True
-                            else:
-                                #price did not hit limit
-                                pass
-                    elif side == 'sell':
-                        if tradetype == util.TradeType.EnterShort.name:
-                            if low <= stopprice:
-                                crypt = ((1-makerfee)*amount)/stopprice
-                                fee = makerfee*amount
-                                self.namespace['usd'] -= amoun
-                                self.namespace[pair] += crypt
-                                sutil.simlog(self.simid, "Enter Short Stop order filled! "+positionid)
-                                positionsfilled.append(position)
-                                filled = True
-                            else:
-                                #price did not hit limit
-                                pass
-                        elif tradetype == util.TradeType.ExitShort.name:
-                            if high >= stopprice:
-                                usd = amount*stopprice
-                                fee = makerfee*usd
-                                usd = usd*(1-makerfee)
-                                self.namespace['usd'] += amount
-                                self.namespace[pair] -= crypt
-                                sutil.simlog(self.simid, "Exit Short Stop order filled! "+positionid)
-                                positionsfilled.append(position)
-                                filled = True
-                            else:
-                                pass
-                                #price did not hit limit
+                    if tradetype == util.TradeType.EnterLong.name:
+                        if high >= stopprice:
+                            crypt = ((1-makerfee)*amount)/stopprice
+                            fee = makerfee*amount
+                            self.namespace['usd'] -= amount
+                            self.namespace['realposition'] += crypt
+                            sutil.simlog("Enter Long Stop order filled! "+positionid)
+                            positionsfilled.append(position)
+                            filled = True
+                        else:
+                            #price did not hit stop
+                            pass
+                    elif tradetype == util.TradeType.ExitLong.name:
+                        if low <= stopprice:
+                            usd = amount*stopprice
+                            fee = makerfee*usd
+                            usd = usd*(1-makerfee)
+                            self.namespace['usd'] += amount
+                            self.namespace['realposition'] -= crypt
+                            sutil.simlog("Exit Long Stop order filled! "+positionid)
+                            positionsfilled.append(position)
+                            filled = True
+                        else:
+                            #price did not hit limit
+                            pass
+                    elif tradetype == util.TradeType.EnterShort.name:
+                        if low <= stopprice:
+                            crypt = ((1-makerfee)*amount)/stopprice
+                            fee = makerfee*amount
+                            self.namespace['usd'] -= amoun
+                            self.namespace['realposition'] += crypt
+                            sutil.simlog("Enter Short Stop order filled! "+positionid)
+                            positionsfilled.append(position)
+                            filled = True
+                        else:
+                            #price did not hit limit
+                            pass
+                    elif tradetype == util.TradeType.ExitShort.name:
+                        if high >= stopprice:
+                            usd = amount*stopprice
+                            fee = makerfee*usd
+                            usd = usd*(1-makerfee)
+                            self.namespace['usd'] += amount
+                            self.namespace['realposition'] -= crypt
+                            sutil.simlog("Exit Short Stop order filled! "+positionid)
+                            positionsfilled.append(position)
+                            filled = True
+                        else:
+                            pass
+                            #price did not hit limit
                     if(filled):
-                        eventdata = {'ordertype':ordertype, 'price':stopprice, 'fee':fee, 'cryptodiff':crypt, 'usddiff':amount, 
-                                     'usdcurr':self.namespace['usd'], 'cryptcurr':self.namespace[pair]}
+                        eventdata = {'ordertype':ordertype, 'price':stopprice, 'fee':fee, 'cryptodiff':crypt, 'usddiff':usd, 
+                                     'usdcurr':self.namespace['usd'], 'cryptcurr':self.namespace['realposition'], 
+                                     'costbasis':self.namespace['costbasis']}
                         sutil.runinsert("INSERT INTO simevent (exchangesimid, candleid, eventtype, eventdata, fee, metadata, time) VALUES(?,?,?,?,?,?,?)",
                                         (self.simid, candle['id'], 'fill:'+str(tradetype)+':'+ordertype, json.dumps(eventdata), fee, "", candle['timestamp']))
             for positionfilled in positionsfilled:
@@ -325,6 +398,8 @@ class Simulation:
             sutil.setkeyval('simpositions', json.dumps(positions))
             self.namespace['pendingpositions'] = positions
 
+            #Now Process the events returned by the user
+
             for event in events:
                 amount = event.amount
                 limitprice = event.limitprice
@@ -334,211 +409,222 @@ class Simulation:
                 stoptrailpercent = event.stoptrailpercent
                 ordertype = util.OrderType.NoOrder
                 price = 0.0
-                side = 'buy'
                 create = False
                 if event.tradetype == util.TradeType.EnterLong:
-                    side = 'buy'
                     if len(positions)>=maxpos:
-                        sutil.simlog(self.simid, "Already at max pending positions")
+                        sutil.simlog("Already at max pending positions")
                         continue
                     if realposition < 0:
-                        sutil.simlog(self.simid, "Can't enter long with an active short position")
+                        sutil.simlog("Can't enter long with an active short position")
                         continue
                     if amount ==0:
                         amount = (usd*0.99)/(maxpos - len(positions))
-                        sutil.simlog(self.simid, "amount not set. calculating based on remaining possible positions of "+str(amount))
+                        sutil.simlog( "amount not set. calculating based on remaining possible positions of "+str(amount))
                     if limitprice == 0 and stopprice == 0:
                         price = close
                         ordertype = util.OrderType.Market
-                        sutil.simlog(self.simid, "Price not set. Entering long at market rate of "+str(price))
+                        sutil.simlog( "Price not set. Entering long at market rate of "+str(price))
                     elif stopprice == 0:
                         if limitprice < close:
                             ordertype = util.OrderType.Limit
-                            sutil.simlog(self.simid, "Price above limit price entering a limit long")
+                            sutil.simlog( "Price above limit price entering a limit long")
                         elif limitprice >= close:
                             ordertype = util.OrderType.Market
                             price = close
-                            sutil.simlog(self.simid, "Price already below limit price. Entering market long order at close price ")
+                            sutil.simlog( "Price already below limit price. Entering market long order at close price ")
                     elif limitprice == 0:
                         if stopprice > close:
                             ordertype = util.OrderType.Stop
-                            sutil.simlog(self.simid, "Price below close entering a stop long")
+                            sutil.simlog( "Price below close entering a stop long")
                         elif limitprice <= close:
                             ordertype = util.OrderType.Market
                             price = close
-                            sutil.simlog(self.simid, "Price already above stop price. Entering market long order at close price ")
+                            sutil.simlog( "Price already above stop price. Entering market long order at close price ")
                     else:
                         if limitprice < close and stopprice > close:
                             ordertype = util.OrderType.Bracket
-                            sutil.simlog(self.simid, "Price inbetween stop and limit. Creating bracket entry long order")
+                            sutil.simlog( "Price inbetween stop and limit. Creating bracket entry long order")
                         else:
                             ordertype = util.OrderType.Market
                             price = close
-                            sutil.simlog(self.simid, "Price outside bracket limit or stop. Creating market long order at current close")
+                            sutil.simlog( "Price outside bracket limit or stop. Creating market long order at current close")
 
                 if event.tradetype == util.TradeType.ExitLong:
-                    side = 'buy'
                     if len(positions)>=maxpos:
-                        sutil.simlog(self.simid, "Already at max pending positions")
+                        sutil.simlog( "Already at max pending positions")
                         continue
                     if realposition < 0:
-                        sutil.simlog(self.simid, "Can't exit long with an active short position")
+                        sutil.simlog( "Can't exit long with an active short position")
                         continue
                     if amount ==0:
                         amount = realposition
-                        sutil.simlog(self.simid, "amount not set. Exiting entire long position of "+str(amount))
+                        sutil.simlog( "amount not set. Exiting entire long position of "+str(amount))
                     if limitprice == 0 and stopprice == 0:
                         price = close
                         ordertype = util.OrderType.Market
-                        sutil.simlog(self.simid, "Price not set. Exiting long at market rate of "+str(price))
+                        sutil.simlog( "Price not set. Exiting long at market rate of "+str(price))
                     elif stopprice == 0:
                         if limitprice > close:
                             ordertype = util.OrderType.Limit
-                            sutil.simlog(self.simid, "Price below limit price creating an exit limit long")
+                            sutil.simlog( "Price below limit price creating an exit limit long")
                         elif limitprice >= close:
                             ordertype = util.OrderType.Market
                             price = close
-                            sutil.simlog(self.simid, "Price already above limit price. Exiting market long order at close price ")
+                            sutil.simlog( "Price already above limit price. Exiting market long order at close price ")
                     elif limitprice == 0:
                         if stopprice < close:
                             ordertype = util.OrderType.Stop
-                            sutil.simlog(self.simid, "Price above close creating an exit stop long")
+                            sutil.simlog( "Price above close creating an exit stop long")
                         elif limitprice >= close:
                             ordertype = util.OrderType.Market
                             price = close
-                            sutil.simlog(self.simid, "Price already below stop price. Exiting market exit long order at close price ")
+                            sutil.simlog( "Price already below stop price. Exiting market exit long order at close price ")
                     else:
                         if limitprice > close and stopprice < close:
                             ordertype = util.OrderType.Bracket
-                            sutil.simlog(self.simid, "Price in between stop and limit. Creating bracket exit long order")
+                            sutil.simlog( "Price in between stop and limit. Creating bracket exit long order")
                         else:
                             ordertype = util.OrderType.Market
                             price = close
-                            sutil.simlog(self.simid, "Price outside bracket limit or stop. Creating market order at current close")
+                            sutil.simlog( "Price outside bracket limit or stop. Creating market order at current close")
 
                 
                 if event.tradetype == util.TradeType.EnterShort:
-                    side = 'sell'
                     if len(positions)>=maxpos:
-                        sutil.simlog(self.simid, "Already at max pending positions")
+                        sutil.simlog( "Already at max pending positions")
                         continue
                     if realposition > 0:
-                        sutil.simlog(self.simid, "Can't enter short with an active long position")
+                        sutil.simlog( "Can't enter short with an active long position")
                         continue
                     if amount ==0:
                         amount = (usd*0.99)/(maxpos - len(positions))
-                        sutil.simlog(self.simid, "amount not set. calculating based on remaining possible positions of "+str(amount))
+                        sutil.simlog( "amount not set. calculating based on remaining possible positions of "+str(amount))
                     if limitprice == 0 and stopprice == 0:
                         price = close
                         ordertype = util.OrderType.Market
-                        sutil.simlog(self.simid, "Price not set. Entering short at market rate of "+str(price))
+                        sutil.simlog( "Price not set. Entering short at market rate of "+str(price))
                     elif stopprice == 0:
                         if limitprice > close:
                             ordertype = util.OrderType.Limit
-                            sutil.simlog(self.simid, "Price below limit price entering a limit short")
+                            sutil.simlog( "Price below limit price entering a limit short")
                         elif limitprice <= close:
                             ordertype = util.OrderType.Market
                             price = close
-                            sutil.simlog(self.simid, "Price already above limit price. Entering market short order at close price ")
+                            sutil.simlog( "Price already above limit price. Entering market short order at close price ")
                     elif limitprice == 0:
                         if stopprice < close:
                             ordertype = util.OrderType.Stop
-                            sutil.simlog(self.simid, "Price above close entering a stop short")
+                            sutil.simlog( "Price above close entering a stop short")
                         elif limitprice <= close:
                             ordertype = util.OrderType.Market
                             price = close
-                            sutil.simlog(self.simid, "Price already below stop price. Entering market short order at close price ")
+                            sutil.simlog( "Price already below stop price. Entering market short order at close price ")
                     else:
                         if limitprice > close and stopprice < close:
                             ordertype = util.OrderType.Bracket
-                            sutil.simlog(self.simid, "Price inbetween stop and limit. Creating bracket short entry order")
+                            sutil.simlog( "Price inbetween stop and limit. Creating bracket short entry order")
                         else:
                             ordertype = util.OrderType.Market
                             price = close
-                            sutil.simlog(self.simid, "Price outside bracket limit or stop. Creating market short order at current close")
+                            sutil.simlog( "Price outside bracket limit or stop. Creating market short order at current close")
 
                 
                 if event.tradetype == util.TradeType.ExitShort:
-                    side = 'buy'
                     if len(positions)>=maxpos:
-                        sutil.simlog(self.simid, "Already at max pending positions")
+                        sutil.simlog( "Already at max pending positions")
                         continue
                     if realposition > 0:
-                        sutil.simlog(self.simid, "Can't exit short with an active long position")
+                        sutil.simlog( "Can't exit short with an active long position")
                         continue
                     if amount ==0:
                         amount = realposition
-                        sutil.simlog(self.simid, "amount not set. Using entire short position of "+str(amount))
+                        sutil.simlog( "amount not set. Using entire short position of "+str(amount))
                     if limitprice == 0 and stopprice == 0:
                         price = close
                         ordertype = util.OrderType.Market
-                        sutil.simlog(self.simid, "Price not set. Exiting short at market rate of "+str(price))
+                        sutil.simlog( "Price not set. Exiting short at market rate of "+str(price))
                     elif stopprice == 0:
                         if limitprice < close:
                             ordertype = util.OrderType.Limit
-                            sutil.simlog(self.simid, "Price above limit price exiting a limit short")
+                            sutil.simlog( "Price above limit price exiting a limit short")
                         elif limitprice >= close:
                             ordertype = util.OrderType.Market
                             price = close
-                            sutil.simlog(self.simid, "Price already below limit price. Exiting market short order at close price ")
+                            sutil.simlog( "Price already below limit price. Exiting market short order at close price ")
                     elif limitprice == 0:
                         if stopprice > close:
                             ordertype = util.OrderType.Stop
-                            sutil.simlog(self.simid, "Price below close exiting a stop short")
+                            sutil.simlog( "Price below close exiting a stop short")
                         elif limitprice <= close:
                             ordertype = util.OrderType.Market
                             price = close
-                            sutil.simlog(self.simid, "Price already above stop price. Exiting market short order at close price ")
+                            sutil.simlog( "Price already above stop price. Exiting market short order at close price ")
                     else:
                         if limitprice < close and stopprice > close:
                             ordertype = util.OrderType.Bracket
-                            sutil.simlog(self.simid, "Price inbetween stop and limit. Creating bracket exit short order")
+                            sutil.simlog( "Price inbetween stop and limit. Creating bracket exit short order")
                         else:
                             ordertype = util.OrderType.Market
                             price = close
-                            sutil.simlog(self.simid, "Price outside bracket limit or stop. Creating market exit short order at current close")
+                            sutil.simlog( "Price outside bracket limit or stop. Creating market exit short order at current close")
 
                 
                 
-                positions.append({'ordertype':ordertype.name, 'price':price, 'amount':amount, 'side':side, 
+                positions.append({'ordertype':ordertype.name, 'price':price, 'amount':amount, 
                                   'stopprice':stopprice, 'limitprice':limitprice, 'limittrailpercent':limittrailpercent,
                                   'stoptrailpercent':stoptrailpercent, 'id':str(uuid.uuid4()), 'tradetype':event.tradetype.name})
                 eventdata = {'ordertype':ordertype.name, 'limitprice':limitprice, 'stopprice':stopprice, 'price':price, 'fee':0, 'amount':amount, 
-                             'usdcurr':self.namespace['usd'], 'cryptcurr':self.namespace[pair]}
+                             'usdcurr':self.namespace['usd'], 'cryptcurr':self.namespace['realposition']}
                 sutil.runinsert("INSERT INTO simevent (exchangesimid, candleid, eventtype, eventdata, fee, metadata, time) VALUES(?,?,?,?,?,?,?)",
                                 (self.simid, candle['id'], 'create:'+str(event.tradetype.name)+':'+ordertype.name, json.dumps(eventdata), fee, "", candle['timestamp']))
-                
+               
+                #Finally fill any market orders immidiately
+
                 def checkmarketorders(position):
                     if position['ordertype'] == util.OrderType.Market.name:
                         usd = 0
                         crypt = 0
                         fee = 0
-                        if position['side'] == 'buy':
-                            if position['tradetype'] == util.TradeType.EnterLong.name:
-                                crypt = ((1-makerfee)*position['amount'])/candle['close']
-                                fee = makerfee*position['amount']
-                                self.namespace['usd'] -= position['amount']
-                                self.namespace[pair] += crypt
-                            elif position['tradetype'] == util.TradeType.ExitLong.name:
-                                usd = position['amount']*candle['close']
-                                fee = makerfee*usd
-                                usd = usd*(1-makerfee)
-                                self.namespace['usd'] += position['amount']
-                                self.namespace[pair] -= crypt
-                        elif position['side'] == 'sell':
-                            if position['tradetype'] == util.TradeType.EnterShort.name:
-                                crypt = ((1-makerfee)*position['amount'])/candle['close']
-                                fee = makerfee*position['amount']
-                                self.namespace['usd'] -= position['amount']
-                                self.namespace[pair] += crypt
-                            elif position['tradetype'] == util.TradeType.ExitShort.name:
-                                usd = position['amount']*candle['close']
-                                fee = makerfee*usd
-                                usd = usd*(1-makerfee)
-                                self.namespace['usd'] += position['amount']
-                                self.namespace[pair] -= crypt
-                        eventdata = {'ordertype':position['ordertype'], 'price':candle['close'], 'fee':fee, 'amount':position['amount'], 
-                                     'usd':usd, 'crypt':crypt, 'usdcurr':self.namespace['usd'], 'cryptcurr':self.namespace[pair]}
+                        price = 0
+                        price = candle['close']
+                        notes = ''
+                        if position['tradetype'] == util.TradeType.EnterLong.name:
+                            notes = "Entered long market order"
+                            crypt = ((1-takerfee)*position['amount'])/price
+                            #fee = makerfee*position['amount']
+                        elif position['tradetype'] == util.TradeType.ExitLong.name:
+                            notes = "Exiting Long Market Order"
+                            crypt = -position['amount']
+                            #usd = position['amount']*price
+                            #fee = makerfee*usd
+                            #usd = usd*(1-makerfee)
+                        if position['tradetype'] == util.TradeType.EnterShort.name:
+                            notes = "Entering Short Market Order"
+                            crypt = -((1-taklerfee)*position['amount'])/candle['close']
+                            #fee = makerfee*position['amount']
+                        elif position['tradetype'] == util.TradeType.ExitShort.name:
+                            notes = "Exiting Short Market Order"
+                            crypt = -position['amount']
+                            #usd = position['amount']*candle['close']
+                            #fee = makerfee*usd
+                            #usd = usd*(1-makerfee)
+                        
+                        newprice, newamount, newusd, fee, usd = self.updatecostbasis(price, crypt, takerfee)
+                        sutil.simlog(notes+
+                                     f"<br>&nbsp;&nbsp;&nbsp;Limit Price:{str(price)}"+
+                                     f"<br>&nbsp;&nbsp;&nbsp;Maker Fee:{str(makerfee)}"+
+                                     f"<br>&nbsp;&nbsp;&nbsp;Fee Paid:${str(fee)}"+
+                                     f"<br>&nbsp;&nbsp;&nbsp;Crypto Change${str(crypt)}"+
+                                     f"<br>&nbsp;&nbsp;&nbsp;USD Change${str(usd)}"+
+                                     f"<br>&nbsp;&nbsp;&nbsp;Average Price${str(newprice)}"+
+                                     f"<br>&nbsp;&nbsp;&nbsp;Crypto Holdings${str(newamount)}"+
+                                     f"<br>&nbsp;&nbsp;&nbsp;USD Holdings${str(newusd)}")
+
+                        eventdata = {'ordertype':ordertype.name, 'price':price, 'fee':fee, 'cryptodiff':crypt, 'usddiff':usd, 
+                                     'usdcurr':self.namespace['usd'], 'cryptcurr':self.namespace['realposition'], 
+                                     'costbasis':self.namespace['costbasis']}
+                        #eventdata = {'ordertype':position['ordertype'], 'price':candle['close'], 'fee':fee, 'amount':position['amount'], 
+                        #             'usd':usd, 'crypt':crypt, 'usdcurr':self.namespace['usd'], 'cryptcurr':self.namespace['realposition']}
                         sutil.runinsert("INSERT INTO simevent (exchangesimid, candleid, eventtype, eventdata, fee, metadata, time) VALUES(?,?,?,?,?,?,?)",
                                         (self.simid, candle['id'], 'fill:'+str(event.tradetype.name)+':'+ordertype.name, json.dumps(eventdata), fee, "", candle['timestamp']))
                         return True
@@ -549,9 +635,6 @@ class Simulation:
                 sutil.setkeyval('simpositions', json.dumps(positions))
                 self.namespace['pendingpositions'] = positions
 
-                    
-
-        
         
 
         self.N += 1
