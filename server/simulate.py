@@ -235,7 +235,6 @@ class Simulation:
                 ordertype = position['ordertype']
                 price = float(position['price'])
                 amount = float(position['amount'])
-                #side = position['side']
                 stopprice = float(position['stopprice'])
                 limitprice = float(position['limitprice'])
                 limittrailpercent = float(position['limittrailpercent'])
@@ -249,6 +248,20 @@ class Simulation:
                 if ordertype == util.OrderType.Limit.name or ordertype == util.OrderType.Bracket.name:
                     if tradetype == util.TradeType.EnterLong.name:
                         if low <= limitprice:
+                            if(self.namespace['realposition'] < 0):
+                                liquid = -self.namespace['realposition'] 
+                                newprice, newamount, newusd, fee, usd = self.updatecostbasis(limitprice, liquid, makerfee)
+                                sutil.simlog("Filling long, need to exit short first "+
+                                             f"<br>&nbsp;&nbsp;&nbsp;Id: {positionid}" +
+                                             f"<br>&nbsp;&nbsp;&nbsp;Limit Price:{str(limitprice)}"+
+                                             f"<br>&nbsp;&nbsp;&nbsp;Maker Fee:{str(makerfee)}"+
+                                             f"<br>&nbsp;&nbsp;&nbsp;Fee Paid:${str(fee)}"+
+                                             f"<br>&nbsp;&nbsp;&nbsp;Crypto Change${str(liquid)}"+
+                                             f"<br>&nbsp;&nbsp;&nbsp;USD Change${str(usd)}"+
+                                             f"<br>&nbsp;&nbsp;&nbsp;Average Price${str(newprice)}"+
+                                             f"<br>&nbsp;&nbsp;&nbsp;Crypto Holdings${str(newamount)}"+
+                                             f"<br>&nbsp;&nbsp;&nbsp;USD Holdings${str(newusd)}")
+
                             fee = makerfee*amount
                             crypt = (amount - fee)/limitprice
                             newprice, newamount, newusd, fee, usd = self.updatecostbasis(limitprice, crypt, makerfee)
@@ -336,10 +349,18 @@ class Simulation:
                     if tradetype == util.TradeType.EnterLong.name:
                         if high >= stopprice:
                             crypt = ((1-makerfee)*amount)/stopprice
-                            fee = makerfee*amount
-                            self.namespace['usd'] -= amount
-                            self.namespace['realposition'] += crypt
-                            sutil.simlog("Enter Long Stop order filled! "+positionid)
+                            newprice, newamount, newusd, fee, usd = self.updatecostbasis(stopprice, crypt, makerfee)
+                            sutil.simlog("Exit Long Limit order filled!"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;Id: {positionid}" +
+                                         f"<br>&nbsp;&nbsp;&nbsp;Stop Price:{str(stopprice)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;Maker Fee:{str(makerfee)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;Fee Paid:${str(fee)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;Crypto Change${str(crypt)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;USD Change${str(usd)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;Average Price${str(newprice)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;Crypto Holdings${str(newamount)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;USD Holdings${str(newusd)}")
+                            sutil.simlog("Exit Short Limit order filled! "+positionid)
                             positionsfilled.append(position)
                             filled = True
                         else:
@@ -347,12 +368,18 @@ class Simulation:
                             pass
                     elif tradetype == util.TradeType.ExitLong.name:
                         if low <= stopprice:
-                            usd = amount*stopprice
-                            fee = makerfee*usd
-                            usd = usd*(1-makerfee)
-                            self.namespace['usd'] += amount
-                            self.namespace['realposition'] -= crypt
-                            sutil.simlog("Exit Long Stop order filled! "+positionid)
+                            crypt = amount
+                            newprice, newamount, newusd, fee, usd = self.updatecostbasis(stopprice, crypt, makerfee)
+                            sutil.simlog("Exit Long Limit order filled!"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;Id: {positionid}" +
+                                         f"<br>&nbsp;&nbsp;&nbsp;Stop Price:{str(stopprice)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;Maker Fee:{str(makerfee)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;Fee Paid:${str(fee)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;Crypto Change${str(crypt)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;USD Change${str(usd)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;Average Price${str(newprice)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;Crypto Holdings${str(newamount)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;USD Holdings${str(newusd)}")
                             positionsfilled.append(position)
                             filled = True
                         else:
@@ -361,10 +388,17 @@ class Simulation:
                     elif tradetype == util.TradeType.EnterShort.name:
                         if low <= stopprice:
                             crypt = ((1-makerfee)*amount)/stopprice
-                            fee = makerfee*amount
-                            self.namespace['usd'] -= amoun
-                            self.namespace['realposition'] += crypt
-                            sutil.simlog("Enter Short Stop order filled! "+positionid)
+                            newprice, newamount, newusd, fee, usd = self.updatecostbasis(stopprice, crypt, makerfee)
+                            sutil.simlog("Exit Long Limit order filled!"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;Id: {positionid}" +
+                                         f"<br>&nbsp;&nbsp;&nbsp;Stop Price:{str(stopprice)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;Maker Fee:{str(makerfee)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;Fee Paid:${str(fee)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;Crypto Change${str(crypt)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;USD Change${str(usd)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;Average Price${str(newprice)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;Crypto Holdings${str(newamount)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;USD Holdings${str(newusd)}")
                             positionsfilled.append(position)
                             filled = True
                         else:
@@ -372,12 +406,18 @@ class Simulation:
                             pass
                     elif tradetype == util.TradeType.ExitShort.name:
                         if high >= stopprice:
-                            usd = amount*stopprice
-                            fee = makerfee*usd
-                            usd = usd*(1-makerfee)
-                            self.namespace['usd'] += amount
-                            self.namespace['realposition'] -= crypt
-                            sutil.simlog("Exit Short Stop order filled! "+positionid)
+                            crypt = amount
+                            newprice, newamount, newusd, fee, usd = self.updatecostbasis(stopprice, crypt, makerfee)
+                            sutil.simlog("Exit Long Limit order filled!"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;Id: {positionid}" +
+                                         f"<br>&nbsp;&nbsp;&nbsp;Stop Price:{str(stopprice)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;Maker Fee:{str(makerfee)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;Fee Paid:${str(fee)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;Crypto Change${str(crypt)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;USD Change${str(usd)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;Average Price${str(newprice)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;Crypto Holdings${str(newamount)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;USD Holdings${str(newusd)}")
                             positionsfilled.append(position)
                             filled = True
                         else:
@@ -410,13 +450,18 @@ class Simulation:
                 ordertype = util.OrderType.NoOrder
                 price = 0.0
                 create = False
+                sutil.simlog(f"------Processing user request------<br>Time: {self.namespace['time']}"+
+                             f"limit price:{limitprice}<br>stop price:{stopprice} <br>"+
+                             f"amount:{amount}<br>")
+
                 if event.tradetype == util.TradeType.EnterLong:
+                    sutil.simlog("Processing request to enter long")
                     if len(positions)>=maxpos:
                         sutil.simlog("Already at max pending positions")
                         continue
-                    if realposition < 0:
-                        sutil.simlog("Can't enter long with an active short position")
-                        continue
+                    #if self.namespace['realposition'] < 0:
+                    #    sutil.simlog("Can't enter long with an active short position")
+                    #    continue
                     if amount ==0:
                         amount = (usd*0.99)/(maxpos - len(positions))
                         sutil.simlog( "amount not set. calculating based on remaining possible positions of "+str(amount))
@@ -450,14 +495,15 @@ class Simulation:
                             sutil.simlog( "Price outside bracket limit or stop. Creating market long order at current close")
 
                 if event.tradetype == util.TradeType.ExitLong:
+                    sutil.simlog("Processing request to exit long")
                     if len(positions)>=maxpos:
                         sutil.simlog( "Already at max pending positions")
                         continue
-                    if realposition < 0:
+                    if self.namespace['realposition'] < 0:
                         sutil.simlog( "Can't exit long with an active short position")
                         continue
                     if amount ==0:
-                        amount = realposition
+                        amount = self.namespace['realposition']
                         sutil.simlog( "amount not set. Exiting entire long position of "+str(amount))
                     if limitprice == 0 and stopprice == 0:
                         price = close
@@ -488,14 +534,14 @@ class Simulation:
                             price = close
                             sutil.simlog( "Price outside bracket limit or stop. Creating market order at current close")
 
-                
                 if event.tradetype == util.TradeType.EnterShort:
+                    sutil.simlog("Processing request to enter short position")
                     if len(positions)>=maxpos:
                         sutil.simlog( "Already at max pending positions")
                         continue
-                    if realposition > 0:
-                        sutil.simlog( "Can't enter short with an active long position")
-                        continue
+                    #if self.namespace['realposition'] > 0:
+                    #    sutil.simlog( "Can't enter short with an active long position")
+                    #    continue
                     if amount ==0:
                         amount = (usd*0.99)/(maxpos - len(positions))
                         sutil.simlog( "amount not set. calculating based on remaining possible positions of "+str(amount))
@@ -530,14 +576,15 @@ class Simulation:
 
                 
                 if event.tradetype == util.TradeType.ExitShort:
+                    sutil.simlog( "Processing request to exit short")
                     if len(positions)>=maxpos:
                         sutil.simlog( "Already at max pending positions")
                         continue
-                    if realposition > 0:
+                    if self.namespace['realposition'] > 0:
                         sutil.simlog( "Can't exit short with an active long position")
                         continue
                     if amount ==0:
-                        amount = realposition
+                        amount = self.namespace['realposition']
                         sutil.simlog( "amount not set. Using entire short position of "+str(amount))
                     if limitprice == 0 and stopprice == 0:
                         price = close
@@ -591,28 +638,45 @@ class Simulation:
                         if position['tradetype'] == util.TradeType.EnterLong.name:
                             notes = "Entered long market order"
                             crypt = ((1-takerfee)*position['amount'])/price
-                            #fee = makerfee*position['amount']
                         elif position['tradetype'] == util.TradeType.ExitLong.name:
                             notes = "Exiting Long Market Order"
                             crypt = -position['amount']
-                            #usd = position['amount']*price
-                            #fee = makerfee*usd
-                            #usd = usd*(1-makerfee)
                         if position['tradetype'] == util.TradeType.EnterShort.name:
                             notes = "Entering Short Market Order"
                             crypt = -((1-taklerfee)*position['amount'])/candle['close']
-                            #fee = makerfee*position['amount']
                         elif position['tradetype'] == util.TradeType.ExitShort.name:
                             notes = "Exiting Short Market Order"
                             crypt = -position['amount']
-                            #usd = position['amount']*candle['close']
-                            #fee = makerfee*usd
-                            #usd = usd*(1-makerfee)
-                        
+                       
+                        if((position['tradetype'] == util.TradeType.EnterLong.name and self.namespace['realposition'] < 0) or
+                           (position['tradetype'] == util.TradeType.EnterShort.name and self.namespace['realposition'] > 0)):
+                            liquidamount = -self.namespace['realposition']
+                            newprice, newamount, newusd, fee, usd = self.updatecostbasis(price, liquidamount, takerfee)
+                            sellfirst = "Exiting short position and entering long at once. Shown as 2 separate transactions" 
+                            if(position['tradetype'] == util.TradeType.EnterLong.name):
+                                sellfirst = "Exiting long position and entering short at once. Shown as 2 separate transactions" 
+
+                            sutil.simlog(sellfirst+
+                                         f"<br>&nbsp;&nbsp;&nbsp;Limit Price:{str(price)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;Maker Fee:{str(takerfee)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;Fee Paid:${str(fee)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;Crypto Change${str(liquidamount)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;USD Change${str(usd)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;Average Price${str(newprice)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;Crypto Holdings${str(newamount)}"+
+                                         f"<br>&nbsp;&nbsp;&nbsp;USD Holdings${str(newusd)}")
+                            eventdata = {'ordertype':ordertype.name, 'price':price, 'fee':fee, 'cryptodiff':crypt, 'usddiff':usd, 
+                                         'usdcurr':self.namespace['usd'], 'cryptcurr':self.namespace['realposition'], 
+                                         'costbasis':self.namespace['costbasis']}
+                            sutil.runinsert("INSERT INTO simevent (exchangesimid, candleid, eventtype, eventdata, fee, metadata, time) VALUES(?,?,?,?,?,?,?)",
+                                            (self.simid, candle['id'], 'fill:'+str(event.tradetype.name)+':'+ordertype.name, json.dumps(eventdata), fee, "", candle['timestamp']))
+
+
+
                         newprice, newamount, newusd, fee, usd = self.updatecostbasis(price, crypt, takerfee)
                         sutil.simlog(notes+
                                      f"<br>&nbsp;&nbsp;&nbsp;Limit Price:{str(price)}"+
-                                     f"<br>&nbsp;&nbsp;&nbsp;Maker Fee:{str(makerfee)}"+
+                                     f"<br>&nbsp;&nbsp;&nbsp;Maker Fee:{str(takerfee)}"+
                                      f"<br>&nbsp;&nbsp;&nbsp;Fee Paid:${str(fee)}"+
                                      f"<br>&nbsp;&nbsp;&nbsp;Crypto Change${str(crypt)}"+
                                      f"<br>&nbsp;&nbsp;&nbsp;USD Change${str(usd)}"+
@@ -623,8 +687,6 @@ class Simulation:
                         eventdata = {'ordertype':ordertype.name, 'price':price, 'fee':fee, 'cryptodiff':crypt, 'usddiff':usd, 
                                      'usdcurr':self.namespace['usd'], 'cryptcurr':self.namespace['realposition'], 
                                      'costbasis':self.namespace['costbasis']}
-                        #eventdata = {'ordertype':position['ordertype'], 'price':candle['close'], 'fee':fee, 'amount':position['amount'], 
-                        #             'usd':usd, 'crypt':crypt, 'usdcurr':self.namespace['usd'], 'cryptcurr':self.namespace['realposition']}
                         sutil.runinsert("INSERT INTO simevent (exchangesimid, candleid, eventtype, eventdata, fee, metadata, time) VALUES(?,?,?,?,?,?,?)",
                                         (self.simid, candle['id'], 'fill:'+str(event.tradetype.name)+':'+ordertype.name, json.dumps(eventdata), fee, "", candle['timestamp']))
                         return True
