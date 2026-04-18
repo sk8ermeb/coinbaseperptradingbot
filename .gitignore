@@ -2,3 +2,6 @@
 server/data/
 venv/
 __pycache__/
+CLAUDE.md
+.claude/
+

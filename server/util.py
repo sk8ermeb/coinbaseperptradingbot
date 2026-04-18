@@ -8,11 +8,9 @@ import json
 #there won't be duplicate instances of anything
 class TradeType(Enum):
     NoTrade = 0
-    EnterLong = 1
-    ExitLong = 2
-    EnterShort = 3
-    ExitShort = 4
-    Exit = 5
+    Exit = 1
+    Buy = 2
+    Sell = 3
 class OrderType(Enum):
     NoOrder = 0
     #buy at the curent market long or short price
