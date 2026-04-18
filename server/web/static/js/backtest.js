@@ -273,3 +273,18 @@ function addindicators(indicators){
   }
 }
 document.getElementById('simlog').innerHTML = "Log<br>Files";
+
+function onScriptChange(select) {
+  if (select && select.value > -1) {
+    localStorage.setItem('selectedScriptId', select.value);
+  }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const lastId = localStorage.getItem('selectedScriptId');
+  if (!lastId) return;
+  const select = document.getElementById('scriptDropdown');
+  for (const opt of select.options) {
+    if (opt.value === lastId) { opt.selected = true; break; }
+  }
+});

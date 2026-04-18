@@ -236,24 +236,59 @@ async def live_status(session: str = Depends(require_session)):
 
 
 @router.get("/live/candles")
-async def live_candles(session: str = Depends(require_session)):
-    pair = autil.getkeyval('live_pair') or 'btc'
-    granularity = autil.getkeyval('live_granularity') or 'ONE_HOUR'
-    product_id = pair.upper() + '-PERP-INTX'
-    gran_secs = live_module.GRAN_SECONDS.get(granularity, 3600)
+async def live_candles(session: str = Depends(require_session),
+                       pair: str = Query(None),
+                       granularity: str = Query(None)):
+    trader = live_module.get_trader()
+    if trader and trader.running:
+        use_pair = trader.pair
+        use_gran = trader.granularity
+    else:
+        use_pair = pair or autil.getkeyval('live_pair') or 'btc'
+        use_gran = granularity or autil.getkeyval('live_granularity') or 'ONE_HOUR'
+
+    product_id = use_pair.upper() + '-PERP-INTX'
+    gran_secs = live_module.GRAN_SECONDS.get(use_gran, 3600)
     import time as _time
     now = int(_time.time())
     start = now - 200 * gran_secs
-    candles = autil.gethistoricledata(granularity, product_id, start, now)
+    candles = autil.gethistoricledata(use_gran, product_id, start, now)
 
-    # Attach live indicator history if trader is running
-    trader = live_module.get_trader()
     indicators = {}
     if trader and trader._ind_history:
         for name, entries in trader._ind_history.items():
             indicators[name] = entries
 
     return JSONResponse({'candles': candles, 'indicators': indicators})
+
+
+@router.get("/live/price")
+async def live_price(session: str = Depends(require_session)):
+    trader = live_module.get_trader()
+    use_pair = (trader.pair if trader else None) or autil.getkeyval('live_pair') or 'btc'
+    product_id = use_pair.upper() + '-PERP-INTX'
+    client = autil.getclient()
+    if client is None:
+        return JSONResponse({'price': 0})
+    try:
+        resp = client.get_best_bid_ask(product_ids=[product_id])
+        pricebooks = resp.to_dict().get('pricebooks', [])
+        if pricebooks:
+            book = pricebooks[0]
+            bids = book.get('bids', [])
+            asks = book.get('asks', [])
+            if bids and asks:
+                price = (float(bids[0]['price']) + float(asks[0]['price'])) / 2
+            elif bids:
+                price = float(bids[0]['price'])
+            elif asks:
+                price = float(asks[0]['price'])
+            else:
+                price = 0
+            return JSONResponse({'price': round(price, 2)})
+    except Exception:
+        pass
+    return JSONResponse({'price': 0})
 
 
 @router.get("/live/history")

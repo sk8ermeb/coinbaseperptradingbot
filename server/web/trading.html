@@ -19,7 +19,7 @@
     </div>
 
     <div class="col-auto">
-      <select class="form-select" id="granularityDropdown">
+      <select class="form-select" id="granularityDropdown" onchange="onGranularityChange()">
         {% for g in granularities %}
           <option value="{{ g }}">{{ g }}</option>
         {% endfor %}

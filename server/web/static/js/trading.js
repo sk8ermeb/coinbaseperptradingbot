@@ -4,8 +4,10 @@ let chartindicators = {};
 let candleslist = [];
 let colors = ['#FF11FF','#11FFFF','#FFFF11','#AAAAFF','#AAFFAA','#FFAAAA','#FFFFFF','#AAAAAA'];
 let pollTimer = null;
+let pricePollTimer = null;
 let isRunning = false;
 let granularityLocked = false;
+let currentPair = 'btc';
 
 // ------------------------------------------------------------------ chart init
 
@@ -29,13 +31,11 @@ chart.timeScale().fitContent();
 chart.subscribeCrosshairMove(param => {
   if (param.time === undefined) return;
   const hovered = new Date(param.time * 1000);
-  let html = '';
   for (const c of candleslist) {
     if (new Date(c.timestamp * 1000).getTime() === hovered.getTime()) {
-      html += `<b>Candle</b><br>O:${c.open} H:${c.high} L:${c.low} C:${c.close}<br>`;
+      break;
     }
   }
-  // no eventsout panel on trading page, but could be added
 });
 
 // ------------------------------------------------------------------ script dropdown
@@ -44,16 +44,23 @@ async function onScriptChange() {
   if (granularityLocked) return;
   const scriptid = document.getElementById('scriptDropdown').value;
   if (scriptid < 0) return;
+  localStorage.setItem('selectedScriptId', scriptid);
   try {
     const resp = await fetch(`/api/live/scriptgranularity?scriptid=${scriptid}`);
     if (resp.ok) {
       const data = await resp.json();
+      currentPair = data.pair || 'btc';
       const drop = document.getElementById('granularityDropdown');
       for (const opt of drop.options) {
         if (opt.value === data.granularity) { opt.selected = true; break; }
       }
+      loadCandles();
     }
   } catch(e) {}
+}
+
+function onGranularityChange() {
+  if (!isRunning) loadCandles();
 }
 
 // ------------------------------------------------------------------ start / stop
@@ -101,10 +108,14 @@ function startPolling() {
   if (pollTimer) clearInterval(pollTimer);
   pollStatus();
   pollTimer = setInterval(pollStatus, 15000);
+
+  if (pricePollTimer) clearInterval(pricePollTimer);
+  pricePollTimer = setInterval(pollPrice, 5000);
 }
 
 function stopPolling() {
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  if (pricePollTimer) { clearInterval(pricePollTimer); pricePollTimer = null; }
 }
 
 async function pollStatus() {
@@ -119,8 +130,20 @@ async function pollStatus() {
     document.getElementById('lastupdate').textContent =
       'Updated ' + new Date().toLocaleTimeString();
 
-    // Refresh candles every poll cycle when running
     if (data.running) loadCandles();
+  } catch(e) {}
+}
+
+async function pollPrice() {
+  try {
+    const resp = await fetch('/api/live/price');
+    if (!resp.ok) return;
+    const data = await resp.json();
+    if (data.price) {
+      document.getElementById('acc_price').textContent = '$' + fmt(data.price);
+      document.getElementById('lastupdate').textContent =
+        'Price updated ' + new Date().toLocaleTimeString();
+    }
   } catch(e) {}
 }
 
@@ -147,7 +170,6 @@ function updateAccountPanel(data) {
   document.getElementById('acc_pair').textContent = (data.pair || '').toUpperCase() + '-PERP-INTX';
   document.getElementById('acc_gran').textContent = data.granularity || '—';
 
-  // Log
   if (data.log && data.log.length) {
     const logEl = document.getElementById('livelog');
     logEl.textContent = data.log.join('\n');
@@ -159,7 +181,9 @@ function updateAccountPanel(data) {
 
 async function loadCandles() {
   try {
-    const resp = await fetch('/api/live/candles');
+    const gran = document.getElementById('granularityDropdown').value;
+    const params = isRunning ? '' : `?pair=${encodeURIComponent(currentPair)}&granularity=${encodeURIComponent(gran)}`;
+    const resp = await fetch('/api/live/candles' + params);
     if (!resp.ok) return;
     const data = await resp.json();
     setChartCandles(data.candles || []);
@@ -187,7 +211,6 @@ function setChartIndicators(indicators) {
       color: colors[j % colors.length], lineWidth: 2,
       priceScaleId: 'right', title: name,
     });
-    // entries are [{time, value}] objects
     const data = (indicators[name] || []).filter(e => e.value !== null && !isNaN(e.value));
     series.setData(data);
     chartindicators[name] = series;
@@ -240,7 +263,15 @@ function renderEvents(events) {
 // ------------------------------------------------------------------ init on load
 
 (async () => {
-  // Read current status to restore UI state
+  // Restore last selected script from localStorage first
+  const savedId = localStorage.getItem('selectedScriptId');
+  if (savedId) {
+    const drop = document.getElementById('scriptDropdown');
+    for (const opt of drop.options) {
+      if (opt.value === savedId) { opt.selected = true; break; }
+    }
+  }
+
   try {
     const resp = await fetch('/api/live/status');
     if (resp.ok) {
@@ -249,23 +280,24 @@ function renderEvents(events) {
       if (data.running) {
         setRunningUI(true);
         startPolling();
-      }
-      // Set dropdowns to match running script/granularity
-      if (data.scriptid) {
-        const drop = document.getElementById('scriptDropdown');
-        for (const opt of drop.options) {
-          if (parseInt(opt.value) === data.scriptid) { opt.selected = true; break; }
+        // Running script overrides localStorage selection
+        if (data.scriptid) {
+          const drop = document.getElementById('scriptDropdown');
+          for (const opt of drop.options) {
+            if (parseInt(opt.value) === data.scriptid) { opt.selected = true; break; }
+          }
         }
-      }
-      if (data.granularity) {
-        const gdrop = document.getElementById('granularityDropdown');
-        for (const opt of gdrop.options) {
-          if (opt.value === data.granularity) { opt.selected = true; break; }
+        if (data.granularity) {
+          const gdrop = document.getElementById('granularityDropdown');
+          for (const opt of gdrop.options) {
+            if (opt.value === data.granularity) { opt.selected = true; break; }
+          }
         }
       }
     }
   } catch(e) {}
-  loadCandles();
-  // On script change when not running, update granularity to script's default
-  if (!isRunning) onScriptChange();
+
+  // Fetch pair/granularity from selected script, then load chart
+  await onScriptChange();
+  if (!isRunning) loadCandles();
 })();

@@ -21,6 +21,7 @@ async function handleScriptSelect(select) {
   const selectedId = select.value;           // this is the script.id
   const selectedName = select.options[select.selectedIndex].text;
   if(selectedId > -1){
+    localStorage.setItem('selectedScriptId', selectedId);
     document.getElementById('delbtn').classList.remove('d-none');
     const response = await fetch('/api/fetchscript?scriptid=' + selectedId, {
       method: 'GET',
@@ -130,6 +131,17 @@ async function handleScriptSave(){
   }
 }
 document.addEventListener('DOMContentLoaded', () => {
+  const lastId = localStorage.getItem('selectedScriptId');
+  const select = document.getElementById('myDropdown');
+  if (lastId) {
+    for (const opt of select.options) {
+      if (opt.value === lastId) {
+        opt.selected = true;
+        handleScriptSelect(select);
+        return;
+      }
+    }
+  }
   window.editor.dispatch({
     changes: { from: 0, to: window.editor.state.doc.length, insert: defscript }
   });
