@@ -8,6 +8,7 @@ from api import router
 from fastapi import Request, Response
 from fastapi.templating import Jinja2Templates
 from util import util
+import live as live_module
 app = FastAPI()
 
 #this links the api calls to the same site from api.py
@@ -24,6 +25,11 @@ os.makedirs(DATA_DIR, exist_ok=True)
 app.mount("/static", StaticFiles(directory=os.path.join(WEB_DIR, "static")), name="static")
 
 myutil = util()
+
+
+@app.on_event("startup")
+async def startup():
+    live_module.maybe_autoresume()
 
 
 def getuserfromsession(sessionid):
@@ -107,6 +113,23 @@ async def root(request: Request):
     return templates.TemplateResponse(
         "settings.html", resp
     )
+
+@app.get("/trading")
+async def trading(request: Request):
+    resp = {"request": request}
+    session_id = request.cookies.get("session")
+    user = getuserfromsession(session_id)
+    if user is not None:
+        resp['user'] = user
+    if user is None:
+        anon = myutil.getconfig('anonymous')
+        if anon == 'true':
+            resp['anon'] = True
+    res = myutil.runselect("SELECT * FROM scripts", ())
+    resp['scripts'] = res if res else []
+    resp['granularities'] = live_module.GRANULARITIES
+    return templates.TemplateResponse("trading.html", resp)
+
 
 @app.get("/algorithms")
 async def root(request: Request):

@@ -1,0 +1,129 @@
+{% extends "base.html" %}
+{% block title %}Live Trading{% endblock %}
+{% block content %}
+<link href="/static/bootstrap-5.3.8-dist/css/bootstrap-icons.css" rel="stylesheet">
+
+<div class="container-fluid py-2">
+  <div class="row align-items-center g-2 flex-wrap">
+
+    <div class="col-auto">
+      <select class="form-select" id="scriptDropdown" onchange="onScriptChange()">
+        {% if scripts %}
+          {% for script in scripts %}
+            <option value="{{ script.id }}">{{ script.name }}</option>
+          {% endfor %}
+        {% else %}
+          <option value="-1">No Scripts</option>
+        {% endif %}
+      </select>
+    </div>
+
+    <div class="col-auto">
+      <select class="form-select" id="granularityDropdown">
+        {% for g in granularities %}
+          <option value="{{ g }}">{{ g }}</option>
+        {% endfor %}
+      </select>
+    </div>
+
+    <div class="col-auto">
+      <button id="bstart" class="btn btn-success rounded-circle d-flex align-items-center justify-content-center"
+          style="width:40px;height:40px;padding:0;" onclick="startTrading()">
+        <i class="bi bi-play-fill display-6" style="margin-left:3px;"></i>
+      </button>
+    </div>
+
+    <div class="col-auto">
+      <button id="bstop" class="btn btn-danger rounded-circle d-flex align-items-center justify-content-center d-none"
+          style="width:40px;height:40px;padding:0;" onclick="stopTrading()">
+        <i class="bi bi-stop-fill"></i>
+      </button>
+    </div>
+
+    <div class="col-auto">
+      <span id="statusbadge" class="badge bg-secondary">Stopped</span>
+    </div>
+
+    <div class="col-auto ms-auto text-muted small" id="lastupdate"></div>
+  </div>
+</div>
+
+<ul class="nav nav-tabs px-2" id="liveTabs">
+  <li class="nav-item">
+    <button class="nav-link active" data-bs-toggle="tab" data-bs-target="#charttab">Chart</button>
+  </li>
+  <li class="nav-item">
+    <button class="nav-link" data-bs-toggle="tab" data-bs-target="#historytab">History</button>
+  </li>
+</ul>
+
+<div class="tab-content">
+
+  <!-- Chart tab -->
+  <div class="tab-pane active" id="charttab">
+    <div class="container-fluid" style="overflow:hidden;">
+      <div class="d-flex flex-column flex-md-row flex-nowrap">
+
+        <!-- Chart -->
+        <div class="flex-grow-1 order-md-1" style="min-width:0;">
+          <div id="chart" class="shadow-sm border border-7 border-secondary rounded-4 p-2 m-3"
+               style="height:calc(100vh - 230px);background:#1a1a1a;"></div>
+        </div>
+
+        <!-- Side panel -->
+        <div class="flex-md-shrink-0 order-md-2 p-2" style="width:300px;">
+          <div class="card mb-2">
+            <div class="card-header fw-bold">Account</div>
+            <div class="card-body p-2 small">
+              <table class="table table-sm table-borderless mb-0">
+                <tbody>
+                  <tr><th>Free Margin</th><td id="acc_usd">—</td></tr>
+                  <tr><th>Total Equity</th><td id="acc_equity">—</td></tr>
+                  <tr><th>Contracts</th><td id="acc_pos">—</td></tr>
+                  <tr><th>Avg Entry</th><td id="acc_cb">—</td></tr>
+                  <tr><th>Mark Price</th><td id="acc_price">—</td></tr>
+                  <tr><th>Unrealized PnL</th><td id="acc_upnl">—</td></tr>
+                  <tr><th>Leverage</th><td id="acc_lev">—</td></tr>
+                  <tr><th>Pair</th><td id="acc_pair">—</td></tr>
+                  <tr><th>Granularity</th><td id="acc_gran">—</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-header fw-bold">Log</div>
+            <div class="card-body p-2">
+              <div id="livelog" style="height:300px;overflow-y:auto;font-size:0.72rem;font-family:monospace;white-space:pre-wrap;"></div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <!-- History tab -->
+  <div class="tab-pane" id="historytab">
+    <div class="container-fluid py-3">
+      <h6>Recent Orders</h6>
+      <table class="table table-sm table-striped table-hover" id="ordertable">
+        <thead><tr>
+          <th>Time</th><th>Type</th><th>Amount</th><th>Limit</th><th>Stop</th><th>Status</th>
+        </tr></thead>
+        <tbody id="orderbody"></tbody>
+      </table>
+      <h6 class="mt-4">Tick Log</h6>
+      <table class="table table-sm table-striped table-hover" id="eventtable">
+        <thead><tr>
+          <th>Time</th><th>Event</th><th>Details</th>
+        </tr></thead>
+        <tbody id="eventbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+</div>
+
+<script src="/static/js/lightweight-charts.standalone.production.js"></script>
+<script src="/static/js/trading.js"></script>
+{% endblock %}

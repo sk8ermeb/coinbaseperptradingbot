@@ -190,6 +190,27 @@ class util:
                 assetamount DECIMAL(20,8),
                 UNIQUE (assettype, assetamount)
             )""")
+            cur.execute("""CREATE TABLE IF NOT EXISTS liveevent (
+                id INTEGER PRIMARY KEY,
+                scriptid INTEGER,
+                eventtype TEXT,
+                eventdata TEXT,
+                time INTEGER
+            )""")
+            cur.execute("""CREATE TABLE IF NOT EXISTS liveorder (
+                id INTEGER PRIMARY KEY,
+                scriptid INTEGER,
+                coinbase_order_id TEXT,
+                internal_id TEXT UNIQUE,
+                tradetype TEXT,
+                limitprice REAL,
+                stopprice REAL,
+                amount REAL,
+                limittrailpercent REAL,
+                stoptrailpercent REAL,
+                status TEXT,
+                time INTEGER
+            )""")
             conn.commit()
             cur.close()
             conn.close()

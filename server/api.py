@@ -8,6 +8,7 @@ import time
 import json
 from fastapi.responses import JSONResponse
 from simulate import Simulation
+import live as live_module
 
 autil = util()
 router = APIRouter(prefix="/api")
@@ -191,6 +192,95 @@ async def login(data: dict, request: Request):
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Incorrect username or password",
-        headers={"WWW-Authenticate": "Bearer"},  # optional, good for APIs
+        headers={"WWW-Authenticate": "Bearer"},
     )
+
+
+# ------------------------------------------------------------------ Live trading routes
+
+@router.post("/live/start")
+async def live_start(session: str = Depends(require_session),
+                     payload: dict = Body(...)):
+    scriptid = int(payload.get('scriptid', -1))
+    if scriptid < 0:
+        raise HTTPException(status_code=400, detail="Invalid script ID")
+    cbkey = autil.getkeyval('cbkey')
+    cbsecret = autil.getkeyval('cbsecret')
+    if not cbkey or not cbsecret:
+        raise HTTPException(status_code=400, detail="Missing Coinbase credentials — add them in Settings")
+    live_module.start_trader(scriptid)
+    return JSONResponse({"status": "started", "scriptid": scriptid})
+
+
+@router.post("/live/stop")
+async def live_stop(session: str = Depends(require_session)):
+    live_module.stop_trader()
+    return JSONResponse({"status": "stopped"})
+
+
+@router.get("/live/status")
+async def live_status(session: str = Depends(require_session)):
+    trader = live_module.get_trader()
+    if trader is None:
+        # Check metadata for last known state
+        scriptid = autil.getkeyval('live_scriptid')
+        return JSONResponse({
+            'running': False, 'scriptid': int(scriptid) if scriptid else None,
+            'pair': autil.getkeyval('live_pair') or 'btc',
+            'granularity': autil.getkeyval('live_granularity') or 'ONE_HOUR',
+            'usd': 0, 'realposition': 0, 'costbasis': 0,
+            'close': 0, 'unrealized_pnl': 0, 'total_equity': 0,
+            'leverage': 10, 'log': [],
+        })
+    return JSONResponse(trader.get_status())
+
+
+@router.get("/live/candles")
+async def live_candles(session: str = Depends(require_session)):
+    pair = autil.getkeyval('live_pair') or 'btc'
+    granularity = autil.getkeyval('live_granularity') or 'ONE_HOUR'
+    product_id = pair.upper() + '-PERP-INTX'
+    gran_secs = live_module.GRAN_SECONDS.get(granularity, 3600)
+    import time as _time
+    now = int(_time.time())
+    start = now - 200 * gran_secs
+    candles = autil.gethistoricledata(granularity, product_id, start, now)
+
+    # Attach live indicator history if trader is running
+    trader = live_module.get_trader()
+    indicators = {}
+    if trader and trader._ind_history:
+        for name, entries in trader._ind_history.items():
+            indicators[name] = entries
+
+    return JSONResponse({'candles': candles, 'indicators': indicators})
+
+
+@router.get("/live/history")
+async def live_history(session: str = Depends(require_session)):
+    scriptid = autil.getkeyval('live_scriptid')
+    if not scriptid:
+        return JSONResponse({'events': []})
+    events = autil.runselect(
+        "SELECT * FROM liveevent WHERE scriptid=? ORDER BY time DESC LIMIT 200",
+        (int(scriptid),))
+    orders = autil.runselect(
+        "SELECT * FROM liveorder WHERE scriptid=? ORDER BY time DESC LIMIT 100",
+        (int(scriptid),))
+    return JSONResponse({'events': events, 'orders': orders})
+
+
+@router.get("/live/scriptgranularity")
+async def live_script_granularity(session: str = Depends(require_session),
+                                  scriptid: int = Query(...)):
+    scripts = autil.runselect("SELECT script FROM scripts WHERE id=?", (scriptid,))
+    if not scripts:
+        raise HTTPException(status_code=404, detail="Script not found")
+    # Quick parse: look for granularity = "..." assignment
+    import re
+    match = re.search(r'granularity\s*=\s*["\'](\w+)["\']', scripts[0]['script'])
+    granularity = match.group(1) if match else 'ONE_HOUR'
+    match_pair = re.search(r'pair\s*=\s*["\'](\w+)["\']', scripts[0]['script'])
+    pair = match_pair.group(1) if match_pair else 'btc'
+    return JSONResponse({'granularity': granularity, 'pair': pair})
 
