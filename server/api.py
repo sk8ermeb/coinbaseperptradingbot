@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from util import util
 import secrets
 import time
+import json
 from fastapi.responses import JSONResponse
 from simulate import Simulation
 
@@ -86,6 +87,40 @@ async def fetchsim(session: str = Depends(require_session),
         siminddata = autil.runselect("SELECT time, indval AS value FROM simindicator WHERE exchangesimid=? AND indname=? AND indval IS NOT NULL ORDER BY time", (simid,name))
         simindicators[name] = siminddata
     simassets = autil.runselect("SELECT * FROM simasset WHERE exchangesimid=?", (simid,))
+
+    # Build per-candle position state by replaying fill events in timestamp order.
+    # Fill events carry usdcurr/cryptcurr/costbasis in their eventdata.
+    fill_events = sorted(
+        [e for e in simevents if e['eventtype'].startswith('fill:')],
+        key=lambda e: e['time']
+    )
+    running_usd = 10000.0
+    running_contracts = 0.0
+    running_costbasis = 0.0
+    fill_idx = 0
+    for candle in candles:
+        ts = candle['timestamp']
+        while fill_idx < len(fill_events) and fill_events[fill_idx]['time'] <= ts:
+            try:
+                edata = json.loads(fill_events[fill_idx]['eventdata'])
+                running_usd = float(edata.get('usdcurr', running_usd))
+                running_contracts = float(edata.get('cryptcurr', running_contracts))
+                running_costbasis = float(edata.get('costbasis', running_costbasis))
+            except Exception:
+                pass
+            fill_idx += 1
+        close_price = float(candle['close'])
+        locked = abs(running_contracts) * running_costbasis / 10  # default leverage=10
+        if running_contracts > 0:
+            upnl = (close_price - running_costbasis) * running_contracts
+        elif running_contracts < 0:
+            upnl = (running_costbasis - close_price) * abs(running_contracts)
+        else:
+            upnl = 0.0
+        candle['sim_usd'] = round(running_usd, 2)
+        candle['sim_contracts'] = round(running_contracts, 6)
+        candle['sim_total_equity'] = round(running_usd + locked + upnl, 2)
+
     response = JSONResponse({'candles':candles, 'assets': simassets, 'indicators':simindicators, 'events':simevents, 'log':simidres['log']})
     return response
 

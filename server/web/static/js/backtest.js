@@ -98,24 +98,24 @@ function setevents(events){
       Color = colors[6];
     }
 
-    if(myev['eventtype'].includes('EnterLong'))
+    if(myev['eventtype'].includes('Buy'))
     {
       Shape = 'arrowUp';
     }
-    else if(myev['eventtype'].includes('EnterShort'))
+    else if(myev['eventtype'].includes('Sell'))
     {
       Shape = 'arrowDown';
     }
-    else if(myev['eventtype'].includes('ExitLong'))
-    {
-      Shape = 'square';
-    }
-    else if(myev['eventtype'].includes('ExitShort'))
+    else if(myev['eventtype'].includes('Liquidation'))
     {
       Shape = 'circle';
     }
+    //else if(myev['eventtype'].includes('ExitShort'))
+    //{
+    //  Shape = 'circle';
+    //}
     else{
-      Color = colors[4];
+      //Color = colors[4];
       Shape = 'square';
     }
     markers.push({time: myev['time'], position: 'aboveBar', color:Color, shape:Shape, text:myev['eventtype']})
@@ -163,11 +163,18 @@ function chartmouseposition(param)
         minute: '2-digit',
         hour12: true
       }).replace(',', '');
+      const simUsd = candle['sim_usd'] !== undefined ? '$'+candle['sim_usd'].toFixed(2) : '—';
+      const simEquity = candle['sim_total_equity'] !== undefined ? '$'+candle['sim_total_equity'].toFixed(2) : '—';
+      const simContracts = candle['sim_contracts'] !== undefined ? candle['sim_contracts'].toFixed(6) : '—';
       hout += "<b>Candle</b></br>Time:"+isostr+
         "</br>Open: "+candle['open']+
         "</br>Close:"+candle['close']+
         "</br>High: "+candle['high']+
-        "</br>Low:  "+candle['low'];
+        "</br>Low:  "+candle['low']+
+        "</br><hr style='margin:4px 0'>"+
+        "</br><b>Free Margin:</b> "+simUsd+
+        "</br><b>Total Equity:</b> "+simEquity+
+        "</br><b>Contracts:</b> "+simContracts;
     }
   }
   hout +="</br>";
