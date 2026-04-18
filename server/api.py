@@ -90,6 +90,9 @@ async def fetchsim(session: str = Depends(require_session),
 
     # Build per-candle position state by replaying fill events in timestamp order.
     # Fill events carry usdcurr/cryptcurr/costbasis in their eventdata.
+    leverage_str = autil.getkeyval(f'sim_{simid}_leverage')
+    sim_leverage = float(leverage_str) if leverage_str else 10.0
+
     fill_events = sorted(
         [e for e in simevents if e['eventtype'].startswith('fill:')],
         key=lambda e: e['time']
@@ -110,7 +113,7 @@ async def fetchsim(session: str = Depends(require_session),
                 pass
             fill_idx += 1
         close_price = float(candle['close'])
-        locked = abs(running_contracts) * running_costbasis / 10  # default leverage=10
+        locked = abs(running_contracts) * running_costbasis / sim_leverage
         if running_contracts > 0:
             upnl = (close_price - running_costbasis) * running_contracts
         elif running_contracts < 0:

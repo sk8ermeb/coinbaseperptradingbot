@@ -74,6 +74,7 @@ class Simulation:
         self.simid = sutil.runinsert("INSERT INTO exchangesim (log, granularity, pair, start, stop, scriptid) VALUES (?, ?, ?, ?, ?, ?)",
                                      ("", self.granularity, self.pair, start, stop, scriptid))
         sutil.setkeyval('simid', self.simid)
+        sutil.setkeyval(f'sim_{self.simid}_leverage', str(self.namespace['leverage']))
         if(not self.good):
             sutil.runupdate("UPDATE exchangesim SET log=?, status=? WHERE id=?", (error, -1, self.simid))
         sutil.SimID = self.simid
