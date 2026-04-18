@@ -310,6 +310,75 @@ class Simulation:
             low = self.namespace['low']
             mark = float(candle['close'])
 
+            # Update trailing limit/stop prices before fill checking
+            trailing_updated = False
+            for position in positions:
+                ltp = float(position['limittrailpercent'])
+                stp = float(position['stoptrailpercent'])
+                tradetype = position['tradetype']
+                cur_pos = self.namespace['realposition']
+
+                if ltp > 0 and float(position['limitprice']) > 0:
+                    cur_limit = float(position['limitprice'])
+                    new_limit = None
+                    if tradetype == util.TradeType.Buy.name:
+                        # Buy limit is below market — trail up as price rises
+                        candidate = mark * (1.0 - ltp)
+                        if candidate > cur_limit:
+                            new_limit = candidate
+                    elif tradetype == util.TradeType.Sell.name:
+                        # Sell limit is above market — trail down as price drops
+                        candidate = mark * (1.0 + ltp)
+                        if candidate < cur_limit:
+                            new_limit = candidate
+                    elif tradetype == util.TradeType.Exit.name:
+                        if cur_pos > 0:
+                            # Exit long profit target above market — trail down if price drops
+                            candidate = mark * (1.0 + ltp)
+                            if candidate < cur_limit:
+                                new_limit = candidate
+                        elif cur_pos < 0:
+                            # Exit short profit target below market — trail up if price rises
+                            candidate = mark * (1.0 - ltp)
+                            if candidate > cur_limit:
+                                new_limit = candidate
+                    if new_limit is not None:
+                        sutil.simlog(f"Trailing limit update [{tradetype}]: {cur_limit:.2f} → {new_limit:.2f} (close:{mark:.2f})")
+                        position['limitprice'] = new_limit
+                        trailing_updated = True
+
+                if stp > 0 and float(position['stopprice']) > 0:
+                    cur_stop = float(position['stopprice'])
+                    new_stop = None
+                    if tradetype == util.TradeType.Buy.name:
+                        # Buy stop is above market — trail down as price drops
+                        candidate = mark * (1.0 + stp)
+                        if candidate < cur_stop:
+                            new_stop = candidate
+                    elif tradetype == util.TradeType.Sell.name:
+                        # Sell stop is below market — trail up as price rises
+                        candidate = mark * (1.0 - stp)
+                        if candidate > cur_stop:
+                            new_stop = candidate
+                    elif tradetype == util.TradeType.Exit.name:
+                        if cur_pos > 0:
+                            # Exit long stop-loss below market — classic trailing stop, trail up as price rises
+                            candidate = mark * (1.0 - stp)
+                            if candidate > cur_stop:
+                                new_stop = candidate
+                        elif cur_pos < 0:
+                            # Exit short stop-loss above market — trail down as price drops
+                            candidate = mark * (1.0 + stp)
+                            if candidate < cur_stop:
+                                new_stop = candidate
+                    if new_stop is not None:
+                        sutil.simlog(f"Trailing stop update [{tradetype}]: {cur_stop:.2f} → {new_stop:.2f} (close:{mark:.2f})")
+                        position['stopprice'] = new_stop
+                        trailing_updated = True
+
+            if trailing_updated:
+                sutil.setkeyval('simpositions', json.dumps(positions))
+
             # Fill any pending limit/stop orders that triggered this candle
             positionsfilled = []
             for position in positions:
