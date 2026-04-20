@@ -9,7 +9,14 @@ from fastapi import Request, Response
 from fastapi.templating import Jinja2Templates
 from util import util
 import live as live_module
-app = FastAPI()
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    live_module.maybe_autoresume()
+    yield
+
+app = FastAPI(lifespan=lifespan)
 
 #this links the api calls to the same site from api.py
 app.include_router(router)  
@@ -26,10 +33,6 @@ app.mount("/static", StaticFiles(directory=os.path.join(WEB_DIR, "static")), nam
 
 myutil = util()
 
-
-@app.on_event("startup")
-async def startup():
-    live_module.maybe_autoresume()
 
 
 def getuserfromsession(sessionid):
