@@ -6,6 +6,7 @@ let picker1;
 let picker2;
 let chartindicators = {}
 let candleslist = [];
+let subPanes = [];
 let eventlist = [];
 let colors = ['#FF11FF', '#11FFFF', '#FFFF11', '#AAAAFF', '#AAFFAA', '#FFAAAA', '#FFFFFF', '#AAAAAA', '#AAFF11' ]
 let initcandles = [
@@ -50,7 +51,7 @@ async function runScript() {
         const events = data['events']
         const indicators = data['indicators']
         const simlog = data['log']
-        document.getElementById('simlog').innerHTML = simlog;
+        document.getElementById('simlog').innerHTML = simlog || '<i>Simulation produced no log entries.</i>';
         clearseries()
         setseries(candles);
         addindicators(indicators);
@@ -94,6 +95,9 @@ function setevents(events){
     else if(myev['eventtype'].startsWith('create')){
       Color = colors[5];
     }
+    else if(myev['eventtype'].startsWith('cancel')){
+      Color = colors[7];
+    }
     else{
       Color = colors[6];
     }
@@ -107,6 +111,10 @@ function setevents(events){
       Shape = 'arrowDown';
     }
     else if(myev['eventtype'].includes('Liquidation'))
+    {
+      Shape = 'circle';
+    }
+    else if(myev['eventtype'].startsWith('cancel'))
     {
       Shape = 'circle';
     }
@@ -130,6 +138,10 @@ function clearseries(){
     chart.removeSeries(chartindicators[inds]);
     delete chartindicators[inds];
   }
+  for (const pane of subPanes) {
+    try { chart.removePane(pane.paneIndex()); } catch(e) {}
+  }
+  subPanes = [];
 }
 function setseries(candles){
   let bars = [];
@@ -257,19 +269,44 @@ picker1 = new tempusDominus.TempusDominus(document.getElementById('datetimepicke
 
 function addindicators(indicators){
   let j = 0;
+
+  // Detect price scale so we can tell oscillators apart from price-scale indicators.
+  // Any indicator whose values are all < 5% of the current close belongs in a sub-pane.
+  const lastClose = candleslist.length > 0 ? candleslist[candleslist.length - 1].close : 0;
+  let subPane = null;
+
   for (const ind in indicators){
+    const data = indicators[ind];
+
+    // Auto-detect oscillator: all non-null values are tiny compared to price
+    let isOscillator = false;
+    if (lastClose > 0 && data.length > 0) {
+      const vals = data.map(d => Math.abs(d.value)).filter(v => v != null && isFinite(v));
+      if (vals.length > 0 && Math.max(...vals) < lastClose * 0.05) {
+        isOscillator = true;
+      }
+    }
+
+    let targetPaneIndex = undefined; // undefined → main (candle) pane
+    if (isOscillator) {
+      if (!subPane) {
+        subPane = chart.addPane();
+        subPanes.push(subPane);
+      }
+      targetPaneIndex = subPane.paneIndex();
+    }
+
     let indicatorseries = chart.addSeries(LightweightCharts.LineSeries, {
       color: colors[j],
       lineWidth: 2,
-      priceScaleId: 'right',  // Align with candles
+      priceScaleId: 'right',
       title: ind
-    });
-    indicatorseries.setData(indicators[ind]);
-    chartindicators[ind] = indicatorseries;  
+    }, targetPaneIndex);
+
+    indicatorseries.setData(data);
+    chartindicators[ind] = indicatorseries;
     j++;
-    if(j>= colors.length){
-      j = 0;
-    }
+    if(j >= colors.length) j = 0;
   }
 }
 document.getElementById('simlog').innerHTML = "Log<br>Files";

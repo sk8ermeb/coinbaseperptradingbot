@@ -55,6 +55,8 @@ class Simulation:
         self.namespace['leverage'] = 10        # Coinbase perps max leverage (10x)
         self.namespace['usd'] = 10000.00       # USDC collateral (free margin)
         self.namespace['fee'] = 0
+        self.namespace['simlog'] = sutil.simlog
+        self.namespace['cancel_order'] = self._cancel_order
         self.historysize = 100
         error = ""
         sutil.setkeyval('simpositions', json.dumps([]))
@@ -78,6 +80,8 @@ class Simulation:
         if(not self.good):
             sutil.runupdate("UPDATE exchangesim SET log=?, status=? WHERE id=?", (error, -1, self.simid))
         sutil.SimID = self.simid
+        sutil.TickTime = "init"
+        sutil.simlog(f"Sim started — pair:{self.pair.upper()}-PERP-INTX granularity:{self.granularity} USD:{self.namespace['usd']:.2f} leverage:{self.namespace['leverage']}x")
 
         self._SimUSDStart = self.namespace['usd']
         self._SimUSDEnd = self.namespace['usd']
@@ -92,6 +96,27 @@ class Simulation:
         self._SimLossTradeCount = 0
         self._SimTradeList = []
 
+
+    def _cancel_order(self, order_id):
+        positions = self.namespace['pendingpositions']
+        cancelled = next((p for p in positions if p['id'] == order_id), None)
+        new_positions = [p for p in positions if p['id'] != order_id]
+        if cancelled:
+            sutil.setkeyval('simpositions', json.dumps(new_positions))
+            self.namespace['pendingpositions'] = new_positions
+            sutil.simlog(f"Cancelled order {order_id}")
+            candle = self.namespace.get('candle', {})
+            eventdata = {
+                'ordertype': cancelled.get('ordertype'), 'limitprice': cancelled.get('limitprice'),
+                'stopprice': cancelled.get('stopprice'), 'amount': cancelled.get('amount'),
+                'tradetype': cancelled.get('tradetype'),
+                'usdcurr': self.namespace['usd'], 'cryptcurr': self.namespace['realposition'],
+            }
+            sutil.runinsert(
+                "INSERT INTO simevent (exchangesimid, candleid, eventtype, eventdata, fee, metadata, time) VALUES(?,?,?,?,?,?,?)",
+                (self.simid, candle.get('id'), 'cancel:' + cancelled.get('tradetype', ''), json.dumps(eventdata), 0, "", candle.get('timestamp', 0)))
+        else:
+            sutil.simlog(f"cancel_order: order {order_id} not found")
 
     def cleanarr(self, arr):
         arr = numpy.array(arr, dtype=float)
@@ -290,17 +315,6 @@ class Simulation:
         self.namespace['calcinds'] = simindicators
 
         if('tick' in self.namespace):
-            events = []
-            try:
-                events = self.namespace['tick']()
-                for event in events:
-                    sutil.runinsert("INSERT INTO simevent (exchangesimid, candleid, eventtype, eventdata, fee, metadata, time) VALUES(?,?,?,?,?,?,?)",
-                                    (self.simid, candle['id'], 'user:'+str(event.tradetype.name), str(event), 0.0, "", candle['timestamp']))
-            except Exception as e:
-                error = str(traceback.format_exc().splitlines()[-2:])
-                sutil.runupdate("UPDATE exchangesim SET log=?, status=? WHERE id=?", (error, -1, self.simid))
-                return False
-
             maxpos = self.namespace['maxpositions']
             makerfee = self.namespace['makerfee']
             takerfee = self.namespace['takerfee']
@@ -332,20 +346,48 @@ class Simulation:
                         if candidate < cur_limit:
                             new_limit = candidate
                     elif tradetype == util.TradeType.Exit.name:
+                        # limitprice is activation threshold; limittrailpercent trails stop from peak
+                        activated = position.get('activated', False)
+                        peak = float(position.get('peak_price', 0))
+                        hard_stop = float(position.get('hard_stopprice', position.get('stopprice', 0)))
                         if cur_pos > 0:
-                            # Exit long profit target above market — trail down if price drops
-                            candidate = mark * (1.0 + ltp)
-                            if candidate < cur_limit:
-                                new_limit = candidate
+                            if not activated and mark >= cur_limit:
+                                activated = True
+                                peak = mark
+                                position['activated'] = True
+                                position['peak_price'] = peak
+                                sutil.simlog(f"Trailing stop activated (long) at {mark:.2f}")
+                                trailing_updated = True
+                            if activated:
+                                if mark > peak:
+                                    peak = mark
+                                    position['peak_price'] = peak
+                                new_stop = peak * (1.0 - ltp)
+                                if hard_stop > 0:
+                                    new_stop = max(new_stop, hard_stop)
+                                if new_stop != float(position['stopprice']):
+                                    sutil.simlog(f"Trailing stop update [Exit long]: peak:{peak:.2f} stop:{new_stop:.2f}")
+                                    position['stopprice'] = new_stop
+                                    trailing_updated = True
                         elif cur_pos < 0:
-                            # Exit short profit target below market — trail up if price rises
-                            candidate = mark * (1.0 - ltp)
-                            if candidate > cur_limit:
-                                new_limit = candidate
-                    if new_limit is not None:
-                        sutil.simlog(f"Trailing limit update [{tradetype}]: {cur_limit:.2f} → {new_limit:.2f} (close:{mark:.2f})")
-                        position['limitprice'] = new_limit
-                        trailing_updated = True
+                            if not activated and mark <= cur_limit:
+                                activated = True
+                                peak = mark
+                                position['activated'] = True
+                                position['peak_price'] = peak
+                                sutil.simlog(f"Trailing stop activated (short) at {mark:.2f}")
+                                trailing_updated = True
+                            if activated:
+                                if peak == 0 or mark < peak:
+                                    peak = mark
+                                    position['peak_price'] = peak
+                                new_stop = peak * (1.0 + ltp)
+                                if hard_stop > 0:
+                                    new_stop = min(new_stop, hard_stop)
+                                if new_stop != float(position['stopprice']):
+                                    sutil.simlog(f"Trailing stop update [Exit short]: trough:{peak:.2f} stop:{new_stop:.2f}")
+                                    position['stopprice'] = new_stop
+                                    trailing_updated = True
 
                 if stp > 0 and float(position['stopprice']) > 0:
                     cur_stop = float(position['stopprice'])
@@ -448,9 +490,12 @@ class Simulation:
                             filled = True
                     elif tradetype == util.TradeType.Exit.name:
                         cur_pos = self.namespace['realposition']
-                        # Long exit limit: profit target above entry, fills when price rises
-                        # Short exit limit: profit target below entry, fills when price falls
-                        if (cur_pos > 0 and high >= limitprice) or (cur_pos < 0 and low <= limitprice):
+                        ltp_val = float(position.get('limittrailpercent', 0))
+                        # When limittrailpercent is set, limitprice is the activation threshold
+                        # for the trailing stop — not a fill target. Skip limit fill in that case.
+                        if ltp_val > 0:
+                            pass
+                        elif (cur_pos > 0 and high >= limitprice) or (cur_pos < 0 and low <= limitprice):
                             close_qty = abs(cur_pos) if amount == 0 else amount
                             crypt = -close_qty if cur_pos > 0 else close_qty
                             newprice, newamount, newusd, fee, notional = self.updatecostbasis(limitprice, crypt, makerfee)
@@ -564,6 +609,18 @@ class Simulation:
             sutil.setkeyval('simpositions', json.dumps(positions))
             self.namespace['pendingpositions'] = positions
 
+            # Call tick() now that fills and trailing updates are fully resolved
+            events = []
+            try:
+                events = self.namespace['tick']()
+                for event in events:
+                    sutil.runinsert("INSERT INTO simevent (exchangesimid, candleid, eventtype, eventdata, fee, metadata, time) VALUES(?,?,?,?,?,?,?)",
+                                    (self.simid, candle['id'], 'user:'+str(event.tradetype.name), str(event), 0.0, "", candle['timestamp']))
+            except Exception as e:
+                error = str(traceback.format_exc().splitlines()[-2:])
+                sutil.runupdate("UPDATE exchangesim SET log=?, status=? WHERE id=?", (error, -1, self.simid))
+                return False
+
             # Process the events returned by the user's tick function
             for event in events:
                 amount = event.amount
@@ -589,6 +646,9 @@ class Simulation:
                     if amount == 0:
                         amount = self.autosize_notional(mark, maxpos - len(positions))
                         sutil.simlog("Auto notional (total equity): "+str(amount))
+                    if amount <= 0:
+                        sutil.simlog("Buy skipped — auto-size returned 0 (equity exhausted?)")
+                        continue
                     if limitprice == 0 and stopprice == 0:
                         price = close
                         ordertype = util.OrderType.Market
@@ -629,6 +689,9 @@ class Simulation:
                     if amount == 0:
                         amount = self.autosize_notional(mark, maxpos - len(positions))
                         sutil.simlog("Auto notional (total equity): "+str(amount))
+                    if amount <= 0:
+                        sutil.simlog("Sell skipped — auto-size returned 0 (equity exhausted?)")
+                        continue
                     if limitprice == 0 and stopprice == 0:
                         price = close
                         ordertype = util.OrderType.Market
@@ -675,7 +738,16 @@ class Simulation:
                         ordertype = util.OrderType.Market
                         sutil.simlog("Market exit at "+str(price))
                     elif stopprice == 0:
-                        if (cur_pos > 0 and limitprice > close) or (cur_pos < 0 and limitprice < close):
+                        if limittrailpercent > 0:
+                            # Trailing exit: limitprice is activation threshold, no hard stop
+                            if (cur_pos > 0 and limitprice > close) or (cur_pos < 0 and limitprice < close):
+                                ordertype = util.OrderType.Bracket
+                                sutil.simlog(f"Trailing exit order: activation at {limitprice} trail:{limittrailpercent}")
+                            else:
+                                ordertype = util.OrderType.Market
+                                price = close
+                                sutil.simlog("Trailing exit: activation already passed — market exit at "+str(price))
+                        elif (cur_pos > 0 and limitprice > close) or (cur_pos < 0 and limitprice < close):
                             ordertype = util.OrderType.Limit
                             sutil.simlog("Limit exit at "+str(limitprice))
                         else:
@@ -691,17 +763,22 @@ class Simulation:
                             price = close
                             sutil.simlog("Stop already triggered — market exit at "+str(price))
                     else:
+                        if limittrailpercent > 0:
+                            sutil.simlog(f"Trailing exit order: activation at {limitprice} hard stop at {stopprice} trail:{limittrailpercent}")
+                        else:
+                            sutil.simlog("Bracket exit order")
                         ordertype = util.OrderType.Bracket
-                        sutil.simlog("Bracket exit order")
 
                 else:
                     sutil.simlog("Unknown trade type: "+str(event.tradetype.name))
                     continue
 
-                positions.append({'ordertype': ordertype.name, 'price': price, 'amount': amount,
-                                  'stopprice': stopprice, 'limitprice': limitprice,
-                                  'limittrailpercent': limittrailpercent, 'stoptrailpercent': stoptrailpercent,
-                                  'id': str(uuid.uuid4()), 'tradetype': event.tradetype.name})
+                new_pos = {'ordertype': ordertype.name, 'price': price, 'amount': amount,
+                           'stopprice': stopprice, 'limitprice': limitprice,
+                           'limittrailpercent': limittrailpercent, 'stoptrailpercent': stoptrailpercent,
+                           'id': str(uuid.uuid4()), 'tradetype': event.tradetype.name,
+                           'activated': False, 'peak_price': 0.0, 'hard_stopprice': float(stopprice)}
+                positions.append(new_pos)
                 eventdata = {'ordertype': ordertype.name, 'limitprice': limitprice, 'stopprice': stopprice,
                              'price': price, 'fee': 0, 'amount': amount,
                              'usdcurr': self.namespace['usd'], 'cryptcurr': self.namespace['realposition']}
@@ -805,4 +882,9 @@ class Simulation:
         while(self.N < len(self.simcandles)):
             if not self.processtick():
                 return False
+        sutil.TickTime = "end"
+        final_usd = self.namespace['usd']
+        final_pos = self.namespace['realposition']
+        pnl = final_usd - self._SimUSDStart
+        sutil.simlog(f"Sim complete — candles:{len(self.simcandles)} finalUSD:${final_usd:.2f} startUSD:${self._SimUSDStart:.2f} PnL:${pnl:.2f} openContracts:{final_pos:.6f}")
         return True

@@ -183,6 +183,7 @@ class LiveTrader:
             'volume': 0, 'time': 0, 'maxpositions': 1,
             'pendingpositions': [], 'realposition': 0.0, 'costbasis': 0.0,
             'usd': 0.0, 'leverage': 10, 'makerfee': 0.0, 'takerfee': 0.0003,
+            'cancel_order': self._cancel_order,
         }
         self.candle_history = []
         self._ind_history = {}
@@ -353,29 +354,59 @@ class LiveTrader:
             new_stop = row['stopprice']
 
             if ltp and ltp > 0 and row['limitprice'] > 0:
-                cur = row['limitprice']
+                cur_limit = row['limitprice']
                 if tradetype == 'Buy':
                     candidate = close_price * (1.0 - ltp)
-                    if candidate > cur:
+                    if candidate > cur_limit:
                         new_limit = candidate
                         updated = True
                 elif tradetype == 'Sell':
                     candidate = close_price * (1.0 + ltp)
-                    if candidate < cur:
+                    if candidate < cur_limit:
                         new_limit = candidate
                         updated = True
                 elif tradetype == 'Exit':
                     pos = self.namespace.get('realposition', 0)
+                    activated = bool(row.get('activated', 0))
+                    peak = float(row.get('peak_price', 0))
+                    hard_stop = float(row.get('hard_stopprice', 0))
+
                     if pos > 0:
-                        candidate = close_price * (1.0 + ltp)
-                        if candidate < cur:
-                            new_limit = candidate
-                            updated = True
+                        if not activated and close_price >= cur_limit:
+                            activated = True
+                            peak = close_price
+                            self._livelog(f"Trailing stop activated (long) at {close_price:.2f}")
+                            lutil.runupdate(
+                                "UPDATE liveorder SET activated=1, peak_price=? WHERE id=?",
+                                (peak, row['id']))
+                        if activated:
+                            if close_price > peak:
+                                peak = close_price
+                                lutil.runupdate("UPDATE liveorder SET peak_price=? WHERE id=?", (peak, row['id']))
+                            trail_stop = peak * (1.0 - ltp)
+                            if hard_stop > 0:
+                                trail_stop = max(trail_stop, hard_stop)
+                            if trail_stop != new_stop:
+                                new_stop = trail_stop
+                                updated = True
                     elif pos < 0:
-                        candidate = close_price * (1.0 - ltp)
-                        if candidate > cur:
-                            new_limit = candidate
-                            updated = True
+                        if not activated and close_price <= cur_limit:
+                            activated = True
+                            peak = close_price
+                            self._livelog(f"Trailing stop activated (short) at {close_price:.2f}")
+                            lutil.runupdate(
+                                "UPDATE liveorder SET activated=1, peak_price=? WHERE id=?",
+                                (peak, row['id']))
+                        if activated:
+                            if peak == 0 or close_price < peak:
+                                peak = close_price
+                                lutil.runupdate("UPDATE liveorder SET peak_price=? WHERE id=?", (peak, row['id']))
+                            trail_stop = peak * (1.0 + ltp)
+                            if hard_stop > 0:
+                                trail_stop = min(trail_stop, hard_stop)
+                            if trail_stop != new_stop:
+                                new_stop = trail_stop
+                                updated = True
 
             if stp and stp > 0 and row['stopprice'] > 0:
                 cur = row['stopprice']
@@ -396,19 +427,51 @@ class LiveTrader:
                 try:
                     if row['coinbase_order_id']:
                         client.cancel_orders([row['coinbase_order_id']])
-                    # Re-place with updated price
                     new_cb_id = str(uuid.uuid4())
                     base_size = str(row['amount'])
-                    if tradetype == 'Buy':
-                        client.limit_order_gtc_buy(new_cb_id, product_id, base_size, str(round(new_limit, 2)))
+                    pos = self.namespace.get('realposition', 0)
+                    # Place a stop order at the new trailing stop price
+                    if new_stop > 0:
+                        limit_price_for_stop = round(new_stop * (0.998 if pos > 0 else 1.002), 2)
+                        stop_direction = 'STOP_DIRECTION_STOP_DOWN' if pos > 0 else 'STOP_DIRECTION_STOP_UP'
+                        side = 'SELL' if pos > 0 else 'BUY'
+                        resp = client.create_order(
+                            client_order_id=new_cb_id, product_id=product_id, side=side,
+                            order_configuration={'stop_limit_stop_limit_gtc': {
+                                'base_size': base_size,
+                                'limit_price': str(limit_price_for_stop),
+                                'stop_price': str(round(new_stop, 2)),
+                                'stop_direction': stop_direction,
+                            }})
+                        new_cb_id = resp.to_dict().get('order_id', new_cb_id)
+                    elif tradetype == 'Buy':
+                        resp = client.limit_order_gtc_buy(new_cb_id, product_id, base_size, str(round(new_limit, 2)))
+                        new_cb_id = resp.to_dict().get('order_id', new_cb_id)
                     elif tradetype in ('Sell', 'Exit'):
-                        client.limit_order_gtc_sell(new_cb_id, product_id, base_size, str(round(new_limit, 2)))
+                        resp = client.limit_order_gtc_sell(new_cb_id, product_id, base_size, str(round(new_limit, 2)))
+                        new_cb_id = resp.to_dict().get('order_id', new_cb_id)
                     lutil.runupdate(
                         "UPDATE liveorder SET coinbase_order_id=?, limitprice=?, stopprice=? WHERE id=?",
                         (new_cb_id, new_limit, new_stop, row['id']))
-                    self._livelog(f"Trailing update [{tradetype}]: limit {row['limitprice']:.2f}→{new_limit:.2f}")
+                    self._livelog(f"Trailing update [{tradetype}]: stop {row['stopprice']:.2f}→{new_stop:.2f}")
                 except Exception:
                     self._livelog(f"Trailing cancel/replace error:\n{traceback.format_exc()}")
+
+    # ------------------------------------------------------------------ cancel order
+
+    def _cancel_order(self, order_id):
+        client = lutil.getclient()
+        if client:
+            try:
+                client.cancel_orders([order_id])
+                self._livelog(f"Cancelled order {order_id}")
+            except Exception:
+                self._livelog(f"cancel_order error:\n{traceback.format_exc()}")
+        positions = self.namespace.get('pendingpositions', [])
+        self.namespace['pendingpositions'] = [p for p in positions if p['id'] != order_id]
+        lutil.runupdate(
+            "UPDATE liveorder SET status='cancelled' WHERE coinbase_order_id=? AND scriptid=?",
+            (order_id, self.scriptid))
 
     # ------------------------------------------------------------------ order execution
 
@@ -535,10 +598,12 @@ class LiveTrader:
                 lutil.runinsert(
                     "INSERT OR IGNORE INTO liveorder "
                     "(scriptid, coinbase_order_id, internal_id, tradetype, limitprice, stopprice, "
-                    "amount, limittrailpercent, stoptrailpercent, status, time) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                    "amount, limittrailpercent, stoptrailpercent, status, time, "
+                    "activated, peak_price, hard_stopprice) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (self.scriptid, cb_order_id, order_id, tradetype.name,
-                     limitprice, stopprice, base_size_f, ltp, stp, 'open', int(time.time())))
+                     limitprice, stopprice, base_size_f, ltp, stp, 'open', int(time.time()),
+                     0, 0.0, float(stopprice)))
 
             self._log_event('order', {
                 'tradetype': tradetype.name, 'amount': amount,
