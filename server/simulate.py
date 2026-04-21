@@ -58,7 +58,7 @@ class Simulation:
         self.namespace['fee'] = 0
         self.namespace['simlog'] = sutil.simlog
         self.namespace['cancel_order'] = self._cancel_order
-        self.historysize = 100
+        self.historysize = 300
         error = ""
         sutil.setkeyval('simpositions', json.dumps([]))
         try:

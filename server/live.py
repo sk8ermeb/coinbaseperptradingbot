@@ -25,7 +25,7 @@ class LiveTrader:
         self.running = False
         self.thread = None
         self.namespace = {}
-        self.historysize = 100
+        self.historysize = 300
         self.pair = 'btc'
         self.granularity = 'ONE_HOUR'
         self.candle_history = []

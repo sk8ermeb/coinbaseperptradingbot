@@ -1,4 +1,15 @@
 
+// Shift a UTC epoch so that toLocaleString() displays it as UTC time.
+// e.g. for UTC-5, 05:00 UTC → date that shows "05:00" in local display
+function utcDate(unixSeconds) {
+  const d = new Date(unixSeconds * 1000);
+  return new Date(d.getTime() + d.getTimezoneOffset() * 60000);
+}
+// Reverse: a date picked by TempusDominus (which added the offset) back to real UTC epoch.
+function pickerToUtc(date) {
+  return Math.floor((date.getTime() - date.getTimezoneOffset() * 60000) / 1000);
+}
+
 let candleSeries;
 let chart;
 let markersPrimitive;
@@ -28,8 +39,8 @@ async function runScript() {
     //let start = Date.UTC(dt1.year, dt1.month, dt1.date, dt1.hours, dt1.minutes)/1000;
     let dt2 = picker2.dates.picked[0];
     //let stop = Date.UTC(dt2.year, dt2.month, dt2.date, dt2.hours, dt2.minutes)/1000;
-    let start = Math.floor(picker1.dates.picked[0].getTime() / 1000);
-    let stop = Math.floor(picker2.dates.picked[0].getTime() / 1000);
+    let start = pickerToUtc(picker1.dates.picked[0]);
+    let stop  = pickerToUtc(picker2.dates.picked[0]);
     const response = await fetch('/api/startsim', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -56,6 +67,7 @@ async function runScript() {
         setseries(candles);
         addindicators(indicators);
         setevents(events);
+        displayStats(computeStats(candles, data['leverage']));
         chart.timeScale().fitContent();
         loadSimHistory(scriptid);
       } else {
@@ -79,57 +91,124 @@ async function runScript() {
 
 }
 
-function setevents(events){
-  let markers = []
-  eventlist = events
-  for(const myev of events){
-    //console.log(myev['eventtype']);
+function eventCategory(eventtype) {
+  if (eventtype.startsWith('user'))   return 'user';
+  if (eventtype.startsWith('fill'))   return 'fill';
+  if (eventtype.startsWith('create')) return 'create';
+  if (eventtype.startsWith('cancel')) return 'cancel';
+  return 'other';
+}
+
+function applyEventFilters() {
+  const showUser   = document.getElementById('chkUser').checked;
+  const showCreate = document.getElementById('chkCreate').checked;
+  const showFill   = document.getElementById('chkFill').checked;
+  const showCancel = document.getElementById('chkCancel').checked;
+  const markers = [];
+  for (const myev of eventlist) {
+    const cat = eventCategory(myev['eventtype']);
+    if (cat === 'user'   && !showUser)   continue;
+    if (cat === 'fill'   && !showFill)   continue;
+    if (cat === 'create' && !showCreate) continue;
+    if (cat === 'cancel' && !showCancel) continue;
     let Color = '';
     let Shape = '';
-    if(myev['eventtype'].startsWith('user'))
-    {
-      Color = colors[3];
-    }
-    else if(myev['eventtype'].startsWith('fill')){
-      Color = colors[4];
-    }
-    else if(myev['eventtype'].startsWith('create')){
-      Color = colors[5];
-    }
-    else if(myev['eventtype'].startsWith('cancel')){
-      Color = colors[7];
-    }
-    else{
-      Color = colors[6];
-    }
-
-    if(myev['eventtype'].includes('Buy'))
-    {
-      Shape = 'arrowUp';
-    }
-    else if(myev['eventtype'].includes('Sell'))
-    {
-      Shape = 'arrowDown';
-    }
-    else if(myev['eventtype'].includes('Liquidation'))
-    {
-      Shape = 'circle';
-    }
-    else if(myev['eventtype'].startsWith('cancel'))
-    {
-      Shape = 'circle';
-    }
-    //else if(myev['eventtype'].includes('ExitShort'))
-    //{
-    //  Shape = 'circle';
-    //}
-    else{
-      //Color = colors[4];
-      Shape = 'square';
-    }
-    markers.push({time: myev['time'], position: 'aboveBar', color:Color, shape:Shape, text:myev['eventtype']})
+    if      (cat === 'user')   Color = colors[3];
+    else if (cat === 'fill')   Color = colors[4];
+    else if (cat === 'create') Color = colors[5];
+    else if (cat === 'cancel') Color = colors[7];
+    else                       Color = colors[6];
+    if      (myev['eventtype'].includes('Buy'))         Shape = 'arrowUp';
+    else if (myev['eventtype'].includes('Sell'))        Shape = 'arrowDown';
+    else if (myev['eventtype'].includes('Liquidation')) Shape = 'circle';
+    else if (cat === 'cancel')                          Shape = 'circle';
+    else                                                Shape = 'square';
+    markers.push({time: myev['time'], position: 'aboveBar', color: Color, shape: Shape, text: myev['eventtype']});
   }
   markersPrimitive.setMarkers(markers);
+}
+
+function onEventFilterChange() {
+  localStorage.setItem('eventFilters', JSON.stringify({
+    user:   document.getElementById('chkUser').checked,
+    create: document.getElementById('chkCreate').checked,
+    fill:   document.getElementById('chkFill').checked,
+    cancel: document.getElementById('chkCancel').checked,
+  }));
+  applyEventFilters();
+}
+
+function setevents(events){
+  eventlist = events;
+  applyEventFilters();
+}
+
+function computeStats(candles, leverage) {
+  if (!candles || candles.length === 0) return null;
+  const first = candles[0];
+  const last  = candles[candles.length - 1];
+  const startEquity = first.sim_total_equity || 0;
+  const finalEquity = last.sim_total_equity  || 0;
+  const finalUSD    = last.sim_usd || 0;
+  const EPS = 1e-8;
+  let trades = [];
+  let prev = 0;
+  let openEquity = 0;
+  for (const c of candles) {
+    const cur    = c.sim_contracts || 0;
+    const equity = c.sim_total_equity || 0;
+    const wasIn  = Math.abs(prev) > EPS;
+    const isIn   = Math.abs(cur)  > EPS;
+    const flip   = wasIn && isIn && ((prev > 0) !== (cur > 0));
+    if (!wasIn && isIn) {
+      openEquity = equity;
+    } else if (wasIn && !isIn) {
+      trades.push({ open: openEquity, close: equity });
+    } else if (flip) {
+      trades.push({ open: openEquity, close: equity });
+      openEquity = equity;
+    }
+    prev = cur;
+  }
+  const totalTrades      = trades.length;
+  const profitableTrades = trades.filter(t => t.close > t.open).length;
+  const pcts = trades.map(t => (t.close - t.open) / Math.abs(t.open) * 100);
+  const avgPct = pcts.length > 0 ? pcts.reduce((a, b) => a + b, 0) / pcts.length : 0;
+  const totalPct = startEquity > 0 ? (finalEquity - startEquity) / startEquity * 100 : 0;
+  return { startEquity, finalEquity, finalUSD, leverage: leverage || '—', totalTrades, profitableTrades, avgPct, totalPct };
+}
+
+function displayStats(stats) {
+  const el = document.getElementById('simstats');
+  if (!stats) { el.innerHTML = '<i class="text-muted">No data.</i>'; return; }
+  const profitPct = stats.totalTrades > 0
+    ? ((stats.profitableTrades / stats.totalTrades) * 100).toFixed(1) + '%'
+    : '—';
+  const avgColor   = stats.avgPct   >= 0 ? 'text-success' : 'text-danger';
+  const totalColor = stats.totalPct >= 0 ? 'text-success' : 'text-danger';
+  el.innerHTML = `
+    <table class="table table-sm table-borderless mb-0">
+      <tbody>
+        <tr><td class="text-muted">Starting Margin</td>
+            <td class="text-end fw-bold">$${stats.startEquity.toFixed(2)}</td></tr>
+        <tr><td class="text-muted">Leverage</td>
+            <td class="text-end fw-bold">${stats.leverage}x</td></tr>
+        <tr><td colspan="2"><hr class="my-1"></td></tr>
+        <tr><td class="text-muted">Total Equity</td>
+            <td class="text-end fw-bold">$${stats.finalEquity.toFixed(2)}</td></tr>
+        <tr><td class="text-muted">Free USD</td>
+            <td class="text-end fw-bold">$${stats.finalUSD.toFixed(2)}</td></tr>
+        <tr><td class="text-muted">Total Trades</td>
+            <td class="text-end fw-bold">${stats.totalTrades}</td></tr>
+        <tr><td class="text-muted">Profitable</td>
+            <td class="text-end fw-bold">${stats.profitableTrades} <span class="text-muted fw-normal">(${profitPct})</span></td></tr>
+        <tr><td class="text-muted">Avg Gain/Trade</td>
+            <td class="text-end fw-bold ${avgColor}">${stats.avgPct.toFixed(2)}%</td></tr>
+        <tr><td colspan="2"><hr class="my-1"></td></tr>
+        <tr><td class="text-muted">Total Return</td>
+            <td class="text-end fw-bold ${totalColor}">${stats.totalPct.toFixed(2)}%</td></tr>
+      </tbody>
+    </table>`;
 }
 
 function clearseries(){
@@ -169,6 +248,7 @@ function chartmouseposition(param)
     myts = new Date(candle['timestamp'] * 1000);
     if (myts.getTime() === hoveredtime.getTime()){
       const isostr = myts.toLocaleString('en-US', {
+        timeZone: 'UTC',
         year: 'numeric',
         month: 'numeric',
         day: 'numeric',
@@ -245,10 +325,14 @@ var dt1 = document.getElementById('dt1hid').dataset.hidden;
 var dt2 = document.getElementById('dt2hid').dataset.hidden;
 let start = new Date(dt1.year, dt1.month, dt1.date, dt1.hours, dt1.minutes).getTime() / 1000;
 let stop = new Date(dt2.year, dt2.month, dt2.date, dt2.hours, dt2.minutes).getTime() / 1000;
+
+const pickerMaxDate = new Date();
+const pickerMinDate = new Date(Date.now() - Math.floor(5 * 365.25 * 24 * 3600 * 1000));
+
 picker2 = new tempusDominus.TempusDominus(document.getElementById('datetimepicker2'), {
-  //defaultDate: new Date(new Date().getFullYear(), new Date().getMonth(), new Date().getDate() - 1),
-  defaultDate: new Date(parseInt(dt2) * 1000),
-  useCurrent: false,           // ← stops jumping to today
+  defaultDate: utcDate(parseInt(dt2)),
+  useCurrent: false,
+  restrictions: { minDate: pickerMinDate, maxDate: pickerMaxDate },
   display: {
     icons: { time: 'bi bi-clock', date: 'bi bi-calendar', up: 'bi bi-arrow-up', down: 'bi bi-arrow-down' },
     components: { clock: true, hours: true, minutes: true}
@@ -259,9 +343,9 @@ chart.subscribeCrosshairMove(chartmouseposition);
 setseries(initcandles);
 
 picker1 = new tempusDominus.TempusDominus(document.getElementById('datetimepicker1'), {
-  //defaultDate: new Date(new Date().getFullYear(), new Date().getMonth(), new Date().getDate() - 2),
-  defaultDate: new Date(parseInt(dt1) * 1000),
-  useCurrent: false,           // ← stops jumping to today
+  defaultDate: utcDate(parseInt(dt1)),
+  useCurrent: false,
+  restrictions: { minDate: pickerMinDate, maxDate: pickerMaxDate },
   display: {
     icons: { time: 'bi bi-clock', date: 'bi bi-calendar', up: 'bi bi-arrow-up', down: 'bi bi-arrow-down' },
     components: { clock: true, hours: true, minutes: true}
@@ -357,6 +441,7 @@ async function onHistoryChange(select) {
   setseries(data.candles);
   addindicators(data.indicators);
   setevents(data.events);
+  displayStats(computeStats(data.candles, data.leverage));
   chart.timeScale().fitContent();
 }
 
@@ -369,4 +454,13 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
   if (select.value > -1) loadSimHistory(select.value);
+
+  const saved = localStorage.getItem('eventFilters');
+  if (saved) {
+    const f = JSON.parse(saved);
+    document.getElementById('chkUser').checked   = f.user   !== false;
+    document.getElementById('chkCreate').checked = f.create !== false;
+    document.getElementById('chkFill').checked   = f.fill   !== false;
+    document.getElementById('chkCancel').checked = f.cancel !== false;
+  }
 });

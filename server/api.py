@@ -125,7 +125,7 @@ async def fetchsim(session: str = Depends(require_session),
         candle['sim_contracts'] = round(running_contracts, 6)
         candle['sim_total_equity'] = round(running_usd + locked + upnl, 2)
 
-    response = JSONResponse({'candles':candles, 'assets': simassets, 'indicators':simindicators, 'events':simevents, 'log':simidres['log']})
+    response = JSONResponse({'candles':candles, 'assets': simassets, 'indicators':simindicators, 'events':simevents, 'log':simidres['log'], 'leverage': sim_leverage})
     return response
 
 @router.get("/simhistory")

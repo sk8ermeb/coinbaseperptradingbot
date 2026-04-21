@@ -491,6 +491,6 @@ class util:
         else:
             print("We already had candles for the stop time")
 
-        candles = self.runselect("SELECT * FROM candle WHERE timestamp>? AND timestamp<? AND duration=? and pair=? ORDER BY timestamp", (start, stop, granularity, pair))
+        candles = self.runselect("SELECT * FROM candle WHERE timestamp>=? AND timestamp<=? AND duration=? and pair=? ORDER BY timestamp", (start, stop, granularity, pair))
         return candles
 
