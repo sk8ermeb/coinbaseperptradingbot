@@ -1,6 +1,7 @@
 import util
 from coinbase.rest import RESTClient
 from datetime import datetime
+import time
 import json
 import talib
 import numpy
@@ -73,8 +74,8 @@ class Simulation:
         print('BTC-PERP-INTX')
         print(historicalpair)
         self.simcandles = sutil.gethistoricledata(self.granularity, historicalpair, self.start, self.stop)
-        self.simid = sutil.runinsert("INSERT INTO exchangesim (log, granularity, pair, start, stop, scriptid) VALUES (?, ?, ?, ?, ?, ?)",
-                                     ("", self.granularity, self.pair, start, stop, scriptid))
+        self.simid = sutil.runinsert("INSERT INTO exchangesim (log, granularity, pair, start, stop, scriptid, runat) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                     ("", self.granularity, self.pair, start, stop, scriptid, int(time.time())))
         sutil.setkeyval('simid', self.simid)
         sutil.setkeyval(f'sim_{self.simid}_leverage', str(self.namespace['leverage']))
         if(not self.good):

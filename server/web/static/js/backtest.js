@@ -57,6 +57,7 @@ async function runScript() {
         addindicators(indicators);
         setevents(events);
         chart.timeScale().fitContent();
+        loadSimHistory(scriptid);
       } else {
         showMessage("Failed to load sim");
       }
@@ -314,14 +315,58 @@ document.getElementById('simlog').innerHTML = "Log<br>Files";
 function onScriptChange(select) {
   if (select && select.value > -1) {
     localStorage.setItem('selectedScriptId', select.value);
+    loadSimHistory(select.value);
   }
+}
+
+async function loadSimHistory(scriptid) {
+  const dropdown = document.getElementById('historyDropdown');
+  dropdown.innerHTML = '<option value="-1">History</option>';
+  if (!scriptid || scriptid < 0) return;
+  const response = await fetch('/api/simhistory?scriptid=' + scriptid);
+  if (!response.ok) return;
+  const data = await response.json();
+  for (const run of data.runs) {
+    let label;
+    if (run.runat && run.runat > 0) {
+      const dt = new Date(run.runat * 1000);
+      label = dt.toLocaleString('en-US', {
+        month: 'numeric', day: 'numeric', year: 'numeric',
+        hour: 'numeric', minute: '2-digit', hour12: true
+      });
+    } else {
+      const d1 = new Date(run.start * 1000).toLocaleDateString('en-US');
+      const d2 = new Date(run.stop * 1000).toLocaleDateString('en-US');
+      label = d1 + ' → ' + d2;
+    }
+    const opt = document.createElement('option');
+    opt.value = run.id;
+    opt.textContent = label;
+    dropdown.appendChild(opt);
+  }
+}
+
+async function onHistoryChange(select) {
+  const simid = select.value;
+  if (simid < 0) return;
+  const simresponse = await fetch('/api/fetchsim?simid=' + simid);
+  if (!simresponse.ok) { showMessage('Failed to load sim'); return; }
+  const data = await simresponse.json();
+  document.getElementById('simlog').innerHTML = data.log || '<i>Simulation produced no log entries.</i>';
+  clearseries();
+  setseries(data.candles);
+  addindicators(data.indicators);
+  setevents(data.events);
+  chart.timeScale().fitContent();
 }
 
 document.addEventListener('DOMContentLoaded', () => {
   const lastId = localStorage.getItem('selectedScriptId');
-  if (!lastId) return;
   const select = document.getElementById('scriptDropdown');
-  for (const opt of select.options) {
-    if (opt.value === lastId) { opt.selected = true; break; }
+  if (lastId) {
+    for (const opt of select.options) {
+      if (opt.value === lastId) { opt.selected = true; break; }
+    }
   }
+  if (select.value > -1) loadSimHistory(select.value);
 });

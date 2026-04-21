@@ -51,8 +51,7 @@ def getuserfromsession(sessionid):
 
 @app.get("/")
 async def root(request: Request):
-    user = None
-    resp = {"request":request}
+    resp = {"request": request}
     session_id = request.cookies.get("session")
     user = getuserfromsession(session_id)
     if user is not None:
@@ -61,9 +60,10 @@ async def root(request: Request):
         anon = myutil.getconfig('anonymous')
         if anon == 'true':
             resp['anon'] = True
-    return templates.TemplateResponse(
-        "index.html", resp
-    )
+    res = myutil.runselect("SELECT * FROM scripts", ())
+    resp['scripts'] = res if res else []
+    resp['granularities'] = live_module.GRANULARITIES
+    return templates.TemplateResponse("trading.html", resp)
 
 
 @app.get("/backtest")

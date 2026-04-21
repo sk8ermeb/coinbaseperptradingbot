@@ -220,6 +220,11 @@ class util:
                     cur.execute(f"ALTER TABLE liveorder ADD COLUMN {col} REAL DEFAULT {default}")
                 except Exception:
                     pass
+            # Migrate exchangesim to add runat timestamp
+            try:
+                cur.execute("ALTER TABLE exchangesim ADD COLUMN runat INTEGER DEFAULT 0")
+            except Exception:
+                pass
             conn.commit()
             cur.close()
             conn.close()
