@@ -294,6 +294,26 @@ class util:
                     pass
         return rowcnt
 
+    def runinsertmany(self, sql: str, params_list: list) -> int:
+        count = 0
+        with self.lock:
+            try:
+                self._conn = sqlite3.connect(self._sqlfile)
+                self._cur = self._conn.cursor()
+                self._cur.executemany(sql, params_list)
+                count = self._cur.rowcount
+                self._conn.commit()
+            finally:
+                try:
+                    self._cur.close()
+                except:
+                    pass
+                try:
+                    self._conn.close()
+                except:
+                    pass
+        return count
+
     def runinsert(self, sql:str, params:tuple)->int:
         new_id = -1
         with self.lock:

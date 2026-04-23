@@ -127,6 +127,58 @@ class Simulation:
             arr = numpy.pad(arr, (missing, 0), constant_values=numpy.nan)
         return arr
 
+    def _precompute_indicators(self):
+        self._ind_arrays = {}
+        if 'indicators' not in self.namespace:
+            return
+        n = len(self.simcandles)
+        if n == 0:
+            return
+
+        self.namespace['opens']   = numpy.array([float(c['open'])   for c in self.simcandles], dtype=float)
+        self.namespace['closes']  = numpy.array([float(c['close'])  for c in self.simcandles], dtype=float)
+        self.namespace['highs']   = numpy.array([float(c['high'])   for c in self.simcandles], dtype=float)
+        self.namespace['lows']    = numpy.array([float(c['low'])    for c in self.simcandles], dtype=float)
+        self.namespace['volumes'] = numpy.array([float(c['volume']) for c in self.simcandles], dtype=float)
+
+        try:
+            raw = self.namespace['indicators']()
+        except Exception as e:
+            error = str(traceback.format_exc().splitlines()[-2:])
+            sutil.runupdate("UPDATE exchangesim SET log=?, status=? WHERE id=?", (error, -1, self.simid))
+            self.good = False
+            return
+
+        for indicator, ind in raw.items():
+            if ind is None or isinstance(ind, (int, float, numpy.integer, numpy.floating)) or (numpy.isscalar(ind) and numpy.isnan(ind)):
+                ind = numpy.array([ind], dtype=float)
+            if isinstance(ind, list):
+                ind = numpy.array(ind, dtype=float)
+            if isinstance(ind, numpy.ndarray):
+                ind = (ind,)
+
+            i = 1
+            for arr in ind:
+                indname = indicator if len(ind) == 1 else f"{indicator}-{i}"
+                arr = numpy.array(arr, dtype=float)
+                if len(arr) < n:
+                    arr = numpy.pad(arr, (n - len(arr), 0), constant_values=numpy.nan)
+                elif len(arr) > n:
+                    arr = arr[-n:]
+
+                self._ind_arrays[indname] = arr
+
+                params_list = [
+                    (self.simid, candle['id'], indname,
+                     None if numpy.isnan(v) else float(v),
+                     candle['timestamp'])
+                    for candle, v in zip(self.simcandles, arr)
+                ]
+                sutil.runinsertmany(
+                    "INSERT INTO simindicator (exchangesimid, candleid, indname, indval, time) VALUES(?,?,?,?,?)",
+                    params_list
+                )
+                i += 1
 
     def compute_total_equity(self, close_price):
         """Total portfolio equity: free margin + locked margin + unrealized PnL.
@@ -280,41 +332,10 @@ class Simulation:
         # Check for liquidation before processing new orders
         self.checkliquidation(candle)
 
-        if('indicators' in self.namespace):
-            try:
-                indicators = self.namespace['indicators']()
-            except Exception as e:
-                error = str(traceback.format_exc().splitlines()[-2:])
-                sutil.runupdate("UPDATE exchangesim SET log=?, status=? WHERE id=?", (error, -1, self.simid))
-                return False
-            for indicator in indicators:
-                ind = indicators[indicator]
-                if ind is None or isinstance(ind, (int, float, numpy.integer, numpy.floating)) or (numpy.isscalar(ind) and numpy.isnan(ind)):
-                    ind = [ind]
-                if isinstance(ind, list):
-                    ind = numpy.array(ind, dtype=float)
-                if isinstance(ind, numpy.ndarray):
-                    ind = (ind,)
-                i = 1
-                indicators[indicator] = ind
-                self.indicators = indicators
-                for inds in ind:
-                    indname = indicator
-                    if(len(ind) > 1):
-                        indname = indicator + "-" + str(i)
-                    res = sutil.runinsert("INSERT INTO simindicator (exchangesimid, candleid, indname, indval, time) VALUES(?,?,?,?,?)",
-                                          (self.simid, candle['id'], indname, inds[-1], candle['timestamp']))
-                    i += 1
-
-        simindicators = {}
-        indnames = sutil.runselect("SELECT DISTINCT indname FROM simindicator WHERE exchangesimid=? ORDER BY indname", (self.simid,))
-        for indname in indnames:
-            name = indname['indname']
-            siminddata = sutil.runselect("SELECT indval FROM simindicator WHERE exchangesimid=? AND indname=? AND indval IS NOT NULL ORDER BY time", (self.simid, name))
-            indlist = [key['indval'] for key in siminddata]
-            indlist = self.cleanarr(indlist)
-            simindicators[name] = indlist
-        self.namespace['calcinds'] = simindicators
+        calcinds = {}
+        for name, full_arr in self._ind_arrays.items():
+            calcinds[name] = self.cleanarr(full_arr[:self.N + 1])
+        self.namespace['calcinds'] = calcinds
 
         if('tick' in self.namespace):
             maxpos = self.namespace['maxpositions']
@@ -881,6 +902,9 @@ class Simulation:
 
 
     def runsim(self):
+        self._precompute_indicators()
+        if not self.good:
+            return False
         total = len(self.simcandles)
         while self.N < total:
             if self.cancelled:
