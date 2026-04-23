@@ -29,8 +29,9 @@
     </div>
 
     <div class="col-auto">
-      <button id="bstopsim" class="btn btn-danger d-none">
-        <i class="bi bi-stop-fill"></i>
+      <button id="bstopsim" class="btn btn-danger rounded-circle d-flex align-items-center justify-content-center d-none"
+          style="width:40px; height:40px; padding:0;" onclick="stopSim()">
+        <i class="bi bi-stop-fill display-6"></i>
       </button>
     </div>
     
@@ -58,8 +59,13 @@
         <option value="-1">History</option>
       </select>
     </div>
-    <div class="col-auto">
-      <p id="prunsim" class="d-none">Running Sim</p>
+    <div class="col-auto d-none" id="simProgressContainer" style="min-width: 200px;">
+      <div class="progress" style="height: 22px; border-radius: 6px;">
+        <div class="progress-bar progress-bar-striped progress-bar-animated bg-primary"
+             role="progressbar"
+             id="simProgressBar"
+             style="width: 0%; font-size: 0.8rem; font-weight: 600;">0%</div>
+      </div>
     </div>
   </div>
 </div>

@@ -6,9 +6,12 @@ from util import util
 import secrets
 import time
 import json
+import threading
 from fastapi.responses import JSONResponse
 from simulate import Simulation
 import live as live_module
+
+_running_sims: dict = {}
 
 autil = util()
 router = APIRouter(prefix="/api")
@@ -138,38 +141,76 @@ async def simhistory(session: str = Depends(require_session),
 
 
 @router.post("/startsim")
-async def savesetting(session: str = Depends(require_session),
-                     payload: dict = Body(...)):
+async def startsim(session: str = Depends(require_session),
+                   payload: dict = Body(...)):
     scriptid = payload['scriptid']
     start = payload['start']
     stop = payload['stop']
     cbkey = autil.getkeyval('cbkey')
     cbsecret = autil.getkeyval('cbsecret')
-    if(cbkey is None or cbsecret is None or len(cbkey)==0 or len(cbsecret) == 0):
+    if cbkey is None or cbsecret is None or len(cbkey) == 0 or len(cbsecret) == 0:
         raise HTTPException(status_code=400, detail="Missing Coinbase Credentials")
 
     mysim = Simulation(start, stop, scriptid)
     simid = mysim.simid
-    rungood = mysim.runsim()
-    if(mysim.good and rungood):
-        autil.setkeyval('simstartdt', start)
-        autil.setkeyval('simstopdt', stop)
-        # Prune runs beyond the 10 most recent for this script
-        all_runs = autil.runselect(
-            "SELECT id FROM exchangesim WHERE scriptid=? AND (status IS NULL OR status != -1) ORDER BY id DESC",
-            (scriptid,))
-        if len(all_runs) > 10:
-            for old_run in all_runs[10:]:
-                old_id = old_run['id']
-                autil.runupdate("DELETE FROM simevent WHERE exchangesimid=?", (old_id,))
-                autil.runupdate("DELETE FROM simindicator WHERE exchangesimid=?", (old_id,))
-                autil.runupdate("DELETE FROM simasset WHERE exchangesimid=?", (old_id,))
-                autil.runupdate("DELETE FROM exchangesim WHERE id=?", (old_id,))
-        response = JSONResponse({"simid": simid})
-        return response
-    else:
-        simerr = autil.runselect("SELECT log, status FROM exchangesim WHERE id=?", (simid,))
+
+    if not mysim.good:
+        simerr = autil.runselect("SELECT log FROM exchangesim WHERE id=?", (simid,))
         raise HTTPException(status_code=400, detail=simerr[0]['log'])
+
+    _running_sims[simid] = mysim
+
+    def _run():
+        try:
+            rungood = mysim.runsim()
+            if rungood:
+                autil.setkeyval('simstartdt', str(start))
+                autil.setkeyval('simstopdt', str(stop))
+                all_runs = autil.runselect(
+                    "SELECT id FROM exchangesim WHERE scriptid=? AND status=1 ORDER BY id DESC",
+                    (scriptid,))
+                if len(all_runs) > 10:
+                    for old_run in all_runs[10:]:
+                        old_id = old_run['id']
+                        autil.runupdate("DELETE FROM simevent WHERE exchangesimid=?", (old_id,))
+                        autil.runupdate("DELETE FROM simindicator WHERE exchangesimid=?", (old_id,))
+                        autil.runupdate("DELETE FROM simasset WHERE exchangesimid=?", (old_id,))
+                        autil.runupdate("DELETE FROM exchangesim WHERE id=?", (old_id,))
+        finally:
+            _running_sims.pop(simid, None)
+
+    threading.Thread(target=_run, daemon=True).start()
+    return JSONResponse({"simid": simid})
+
+
+@router.get("/simstatus")
+async def simstatus(session: str = Depends(require_session),
+                    simid: int = Query(..., description="Sim ID")):
+    rows = autil.runselect(
+        "SELECT status, currenttick, totalticks, log FROM exchangesim WHERE id=?", (simid,))
+    if not rows:
+        raise HTTPException(status_code=400, detail="Sim not found")
+    row = rows[0]
+    status = row['status']
+    current = row.get('currenttick') or 0
+    total = row.get('totalticks') or 0
+    pct = round(current / total * 100, 1) if total > 0 else 0
+    return JSONResponse({
+        'status': status,
+        'current': current,
+        'total': total,
+        'pct': pct,
+        'log': row.get('log') or '',
+    })
+
+
+@router.post("/stopsim")
+async def stopsim(session: str = Depends(require_session),
+                  payload: dict = Body(...)):
+    simid = payload.get('simid')
+    if simid is not None and simid in _running_sims:
+        _running_sims[simid].cancelled = True
+    return JSONResponse({"status": "stopping"})
 
 
 @router.post("/savesetting")

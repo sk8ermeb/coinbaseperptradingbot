@@ -74,8 +74,9 @@ class Simulation:
         print('BTC-PERP-INTX')
         print(historicalpair)
         self.simcandles = sutil.gethistoricledata(self.granularity, historicalpair, self.start, self.stop)
-        self.simid = sutil.runinsert("INSERT INTO exchangesim (log, granularity, pair, start, stop, scriptid, runat) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                                     ("", self.granularity, self.pair, start, stop, scriptid, int(time.time())))
+        self.cancelled = False
+        self.simid = sutil.runinsert("INSERT INTO exchangesim (log, granularity, pair, start, stop, scriptid, runat, currenttick, totalticks) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                     ("", self.granularity, self.pair, start, stop, scriptid, int(time.time()), 0, len(self.simcandles)))
         sutil.setkeyval('simid', self.simid)
         sutil.setkeyval(f'sim_{self.simid}_leverage', str(self.namespace['leverage']))
         if(not self.good):
@@ -880,12 +881,22 @@ class Simulation:
 
 
     def runsim(self):
-        while(self.N < len(self.simcandles)):
-            if not self.processtick():
+        total = len(self.simcandles)
+        while self.N < total:
+            if self.cancelled:
+                sutil.TickTime = "end"
+                sutil.simlog("Simulation cancelled by user")
+                sutil.runupdate("UPDATE exchangesim SET currenttick=?, status=? WHERE id=?", (self.N, -2, self.simid))
                 return False
+            if not self.processtick():
+                sutil.runupdate("UPDATE exchangesim SET status=? WHERE id=?", (-1, self.simid))
+                return False
+            if self.N % 25 == 0:
+                sutil.runupdate("UPDATE exchangesim SET currenttick=? WHERE id=?", (self.N, self.simid))
         sutil.TickTime = "end"
         final_usd = self.namespace['usd']
         final_pos = self.namespace['realposition']
         pnl = final_usd - self._SimUSDStart
-        sutil.simlog(f"Sim complete — candles:{len(self.simcandles)} finalUSD:${final_usd:.2f} startUSD:${self._SimUSDStart:.2f} PnL:${pnl:.2f} openContracts:{final_pos:.6f}")
+        sutil.simlog(f"Sim complete — candles:{total} finalUSD:${final_usd:.2f} startUSD:${self._SimUSDStart:.2f} PnL:${pnl:.2f} openContracts:{final_pos:.6f}")
+        sutil.runupdate("UPDATE exchangesim SET currenttick=?, status=? WHERE id=?", (total, 1, self.simid))
         return True

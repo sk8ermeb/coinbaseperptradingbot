@@ -225,6 +225,15 @@ class util:
                 cur.execute("ALTER TABLE exchangesim ADD COLUMN runat INTEGER DEFAULT 0")
             except Exception:
                 pass
+            # Migrate exchangesim to add simulation progress columns
+            try:
+                cur.execute("ALTER TABLE exchangesim ADD COLUMN currenttick INTEGER DEFAULT 0")
+            except Exception:
+                pass
+            try:
+                cur.execute("ALTER TABLE exchangesim ADD COLUMN totalticks INTEGER DEFAULT 0")
+            except Exception:
+                pass
             conn.commit()
             cur.close()
             conn.close()

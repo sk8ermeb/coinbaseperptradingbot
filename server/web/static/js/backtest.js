@@ -19,6 +19,9 @@ let chartindicators = {}
 let candleslist = [];
 let subPanes = [];
 let eventlist = [];
+let currentSimId = null;
+let currentScriptId = null;
+let simPollInterval = null;
 let colors = ['#FF11FF', '#11FFFF', '#FFFF11', '#AAAAFF', '#AAFFAA', '#FFAAAA', '#FFFFFF', '#AAAAAA', '#AAFF11' ]
 let initcandles = [
       { timestamp: 1766656800, open: 100, high: 110, low: 95,  close: 108 },
@@ -27,68 +30,116 @@ let initcandles = [
       // add more...
     ];
 
+function setSimProgress(pct) {
+  const bar = document.getElementById('simProgressBar');
+  const clamped = Math.min(100, Math.max(0, pct));
+  bar.style.width = clamped + '%';
+  bar.textContent = clamped.toFixed(0) + '%';
+}
+
+function resetSimUI() {
+  if (simPollInterval) {
+    clearInterval(simPollInterval);
+    simPollInterval = null;
+  }
+  document.getElementById('bstartsim').classList.remove('d-none');
+  document.getElementById('bstopsim').classList.add('d-none');
+  document.getElementById('simProgressContainer').classList.add('d-none');
+  setSimProgress(0);
+  currentSimId = null;
+}
+
+async function loadSimResults(simid, scriptid) {
+  const simresponse = await fetch('/api/fetchsim?simid=' + simid);
+  if (simresponse.ok) {
+    const data = await simresponse.json();
+    document.getElementById('simlog').innerHTML = data.log || '<i>Simulation produced no log entries.</i>';
+    clearseries();
+    setseries(data.candles);
+    addindicators(data.indicators);
+    setevents(data.events);
+    displayStats(computeStats(data.candles, data.leverage));
+    chart.timeScale().fitContent();
+    if (scriptid) loadSimHistory(scriptid);
+  } else {
+    showMessage('Failed to load sim results');
+  }
+}
+
+async function stopSim() {
+  if (!currentSimId) return;
+  await fetch('/api/stopsim', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ simid: currentSimId }),
+  });
+}
+
 async function runScript() {
   const select = document.getElementById('scriptDropdown');
-  const scriptid = select.value;  
-  if(scriptid > -1){
-    document.getElementById('prunsim').classList.remove('d-none');
-    document.getElementById('bstopsim').classList.remove('d-none');
-    document.getElementById('bstartsim').classList.add('d-none');
-    if (!picker1 || picker1.dates.picked.length === 0) return null;
-    let dt1 = picker1.dates.picked[0];
-    //let start = Date.UTC(dt1.year, dt1.month, dt1.date, dt1.hours, dt1.minutes)/1000;
-    let dt2 = picker2.dates.picked[0];
-    //let stop = Date.UTC(dt2.year, dt2.month, dt2.date, dt2.hours, dt2.minutes)/1000;
-    let start = pickerToUtc(picker1.dates.picked[0]);
-    let stop  = pickerToUtc(picker2.dates.picked[0]);
-    const response = await fetch('/api/startsim', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ 'scriptid': scriptid, 'start':start, 'stop':stop }),
-    });
-
-    if (response.ok) {
-      const data = await response.json();
-      const simid = data['simid']
-      const simresponse = await fetch('/api/fetchsim?simid=' + simid, {
-        method: 'GET',
-        headers: { 'Content-Type': 'application/json' },
-      });
-
-      if (simresponse.ok) {
-        const data = await simresponse.json();
-        const candles = data['candles']
-        const simassets = data['assets']
-        const events = data['events']
-        const indicators = data['indicators']
-        const simlog = data['log']
-        document.getElementById('simlog').innerHTML = simlog || '<i>Simulation produced no log entries.</i>';
-        clearseries()
-        setseries(candles);
-        addindicators(indicators);
-        setevents(events);
-        displayStats(computeStats(candles, data['leverage']));
-        chart.timeScale().fitContent();
-        loadSimHistory(scriptid);
-      } else {
-        showMessage("Failed to load sim");
-      }
-    }
-    else{
-      const error = await response.json();  // { "detail": "my detail" }
-      showMessage(error.detail);
-    }
-
-  } else {
-    showMessage("You must first create a script to run in the algorithms tab (can be blank)");
-    
+  const scriptid = select.value;
+  if (scriptid <= -1) {
+    showMessage('You must first create a script to run in the algorithms tab (can be blank)');
+    return;
   }
-  setTimeout(() => {
-    document.getElementById('prunsim').classList.add('d-none');
-    document.getElementById('bstopsim').classList.add('d-none');
-    document.getElementById('bstartsim').classList.remove('d-none');
-  }, 1000);
+  if (!picker1 || picker1.dates.picked.length === 0) return;
 
+  document.getElementById('bstartsim').classList.add('d-none');
+  document.getElementById('bstopsim').classList.remove('d-none');
+  document.getElementById('simProgressContainer').classList.remove('d-none');
+  setSimProgress(0);
+  currentScriptId = scriptid;
+
+  const start = pickerToUtc(picker1.dates.picked[0]);
+  const stop  = pickerToUtc(picker2.dates.picked[0]);
+
+  const response = await fetch('/api/startsim', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ scriptid, start, stop }),
+  });
+
+  if (!response.ok) {
+    const err = await response.json();
+    showMessage(err.detail || 'Failed to start simulation');
+    resetSimUI();
+    return;
+  }
+
+  const data = await response.json();
+  currentSimId = data.simid;
+
+  simPollInterval = setInterval(async () => {
+    try {
+      const statusResp = await fetch('/api/simstatus?simid=' + currentSimId);
+      if (!statusResp.ok) return;
+      const s = await statusResp.json();
+
+      setSimProgress(s.pct || 0);
+
+      if (s.status === 1) {
+        // Complete
+        clearInterval(simPollInterval);
+        simPollInterval = null;
+        setSimProgress(100);
+        await loadSimResults(currentSimId, currentScriptId);
+        resetSimUI();
+      } else if (s.status === -2) {
+        // Cancelled
+        clearInterval(simPollInterval);
+        simPollInterval = null;
+        resetSimUI();
+      } else if (s.status === -1) {
+        // Error
+        clearInterval(simPollInterval);
+        simPollInterval = null;
+        showMessage('Simulation error: ' + (s.log || 'unknown error'));
+        resetSimUI();
+      }
+    } catch (e) {
+      // network hiccup — keep polling
+    }
+  }, 1000);
 }
 
 function eventCategory(eventtype) {
