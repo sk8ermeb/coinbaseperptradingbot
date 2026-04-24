@@ -64,7 +64,7 @@ class Simulation:
         try:
             exec(self.script, self.namespace)
         except Exception as e:
-            error = str(traceback.format_exc().splitlines()[-2:])
+            error = traceback.format_exc()
             self.good = False
         if('pair' in self.namespace):
             self.pair = self.namespace['pair']
@@ -144,7 +144,7 @@ class Simulation:
         try:
             raw = self.namespace['indicators']()
         except Exception as e:
-            error = str(traceback.format_exc().splitlines()[-2:])
+            error = traceback.format_exc()
             sutil.runupdate("UPDATE exchangesim SET log=?, status=? WHERE id=?", (error, -1, self.simid))
             self.good = False
             return
@@ -642,7 +642,7 @@ class Simulation:
                     sutil.runinsert("INSERT INTO simevent (exchangesimid, candleid, eventtype, eventdata, fee, metadata, time) VALUES(?,?,?,?,?,?,?)",
                                     (self.simid, candle['id'], 'user:'+str(event.tradetype.name), str(event), 0.0, "", candle['timestamp']))
             except Exception as e:
-                error = str(traceback.format_exc().splitlines()[-2:])
+                error = traceback.format_exc()
                 sutil.runupdate("UPDATE exchangesim SET log=?, status=? WHERE id=?", (error, -1, self.simid))
                 return False
 
