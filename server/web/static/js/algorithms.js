@@ -1,21 +1,116 @@
 
 const defscript = 
 `#Put Your Code Here
-pair='btc'
-granularity='ONE_HOUR'
+# Mean Reversion Strategy
+
+# Logic: SMA_SHORT vs SMA_LONG divergence signals a likely mean-reversion.
+#   - Short SMA well BELOW long SMA and slope turning up → limit buy (bet on bounce up)
+#   - Short SMA well ABOVE long SMA and slope turning down → limit sell/short (bet on drop)
+# Thresholds are scaled by a volatility index.
+# Exits use a trailing stop that gives the position room to breathe.
+#
+
+pair = "btc"
+granularity = "ONE_HOUR"
+leverage = 3          # Lower than max — mean reversion can be underwater a while
+maxpositions = 1      #This strategy only allows for 1 position at a time.
+
+# Strategy parameters (matching original defaults)
+MA_SHORT = 4          #4 hour sma
+MA_LONG  = 96         #4 day sma
+DEVIATION = 0.012      # This is how far the small SMA must drift from the long SMA to signar an entry
+LIMIT_OFFSET = 0.005   # 0.5% better-than- the current price. ensures we get maker fee and the best price
+CANCEL_DRIFT = 0.03   # cancel signal if market drifts 3% from our limit
+STOP_PCT  = 0.10     # How much of a loss do we take before we consider it a run to limit losses
+TRAIL_PCT = 0.015      # trailing stop distance how much valatility relative to our SMA's to
+                      #maximize profits and to actually take gains when it goes back 1.5%
+PROFIT = 0.02        # At what point are we willing to start take profit
+
 def indicators():
-  sma_5 = talib.SMA(closes, timeperiod=10)
-  mysma = (opens[-1]+opens[-2]+opens[-3])/3.0
-  return {'mysma':mysma, 'sma5':sma_5}
+    ma_s = talib.SMA(closes, timeperiod=MA_SHORT)
+    ma_l = talib.SMA(closes, timeperiod=MA_LONG)
+
+    atr_abs = talib.ATR(highs, lows, closes, timeperiod=MA_LONG)
+
+    # Avoid divide-by-zero on early NaN-padded closes
+    #this is tweaked so it goes from about 1 to 2.5
+    safe_closes = numpy.where(closes == 0, 1, closes)
+    atr_pct = atr_abs / safe_closes          # convert to fraction of price
+    atr_adj = (atr_pct - 0.0) * 1000      # shift/scale to match original units
+    vol_idx = numpy.log10(atr_adj) + 0.72
+
+    return {
+        'ma_short': (ma_s,),
+        'ma_long':  (ma_l,),
+        'vol_idx':  (vol_idx,),
+    }
+
 def tick():
-  mysma = calcinds['mysma']
-  sma5 = calcinds['sma5']
-  diff = (mysma[-1] - sma5[-1])/sma5[-1]
-  if(diff is nan):
-    return []
-  if(diff > 0.01):
-    return [TradeOrder(tradetype=TradeType.EnterLong, amount=100, limitprice=90000)]
-  return []
+    orders = []
+
+    # --- Read indicators ---
+    ma_s_arr = calcinds.get('ma_short')
+    ma_l_arr = calcinds.get('ma_long')
+    vol_arr  = calcinds.get('vol_idx')
+
+    #Return if we don't yet have enough historical data to have computed
+    #indicators yet.
+    if ma_s_arr is None or ma_l_arr is None or vol_arr is None:
+        print("indicators are none!!")
+        return orders
+
+    ma_s = ma_s_arr[-1]
+    ma_l = ma_l_arr[-1]
+    vol  = vol_arr[-1]
+    #Return if the indicator arrays are not long enough for our algorithm
+    #in this case we just need them to have 1 entry
+    if numpy.isnan(ma_s) or numpy.isnan(ma_l) or numpy.isnan(vol):
+        return orders
+
+    #This is to cancel pending limit positions if it has drifted to far in the wrong direction
+    for order in list(pendingpositions):
+          lp = order['limitprice']
+          sp = order['stopprice']
+          if order['tradetype'] == 'Buy' and order['limitprice'] > 0:
+              drift = (close - order['limitprice']) / close
+              if drift > CANCEL_DRIFT:
+                  cancel_order(order['id'])
+          if order['tradetype'] == 'Sell' and order['limitprice'] > 0:
+              drift = (close - order['limitprice']) / close
+              if drift < -CANCEL_DRIFT:
+                  cancel_order(order['id'])
+
+    #this is a fine tuning adjustment to scale the importance of the volatility
+    #index multiplier
+    entrvolmultiplier = 2
+    dvol = vol*entrvolmultiplier - entrvolmultiplier +1
+
+    costbasepercent = (ma_s - costbasis)/costbasis
+    percentdrift = (ma_s - ma_l)/ma_l
+    #Entry Logic. For this strategy is if there are no held contracts. I.E. realposition = 0
+    if realposition == 0:
+        if(percentdrift < -DEVIATION*dvol):
+            return [TradeOrder(tradetype=TradeType.Buy, limitprice=close*(1-LIMIT_OFFSET))]
+        elif(percentdrift > DEVIATION*dvol):
+            return [TradeOrder(tradetype=TradeType.Sell, limitprice=close*(1+LIMIT_OFFSET))]
+
+    #Exit logic. For this strategy is if we are holding either short or long contracts and there are no pending limit or stop orders
+    if realposition > 0 and not pendingpositions:
+        return [TradeOrder(
+            TradeType.Exit,
+            stopprice  = costbasis * (1-STOP_PCT),
+            limitprice = costbasis * (1+PROFIT*vol),
+            limittrailpercent = TRAIL_PCT*vol
+        )]
+    if realposition < 0 and not pendingpositions:
+        return [TradeOrder(
+            TradeType.Exit,
+            stopprice         = costbasis * (1+STOP_PCT),
+            limitprice        = costbasis * (1-PROFIT*vol),
+            limittrailpercent = TRAIL_PCT*vol
+        )]
+
+    return orders
 `;
 async function handleScriptSelect(select) {
   const selectedId = select.value;           // this is the script.id

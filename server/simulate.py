@@ -303,6 +303,7 @@ class Simulation:
             sutil.runinsert("INSERT INTO simevent (exchangesimid, candleid, eventtype, eventdata, fee, metadata, time) VALUES(?,?,?,?,?,?,?)",
                             (self.simid, candle['id'], 'fill:Liquidation:Market', json.dumps(eventdata), fee, "", candle['timestamp']))
             sutil.setkeyval('simpositions', json.dumps([]))
+            self.namespace['pendingpositions'] = []
 
 
     def processtick(self):
@@ -331,6 +332,7 @@ class Simulation:
 
         # Check for liquidation before processing new orders
         self.checkliquidation(candle)
+        positions = self.namespace['pendingpositions']  # sync in case liquidation cleared it
 
         calcinds = {}
         for name, full_arr in self._ind_arrays.items():
