@@ -1,7 +1,13 @@
 # coinbaseperptradingbot
-NOT READY
-
+NOT READY FOR LIVE. Beta for everything else. Ready to build out algorithms and run backtesting 
+with an actual coinbase connection
+## Description
 A way to build a trading algorithm for coin base perpetual futures with backtesting
+
+![Alt text](https://github.com/user-attachments/assets/53f0838f-43a6-43f8-a8e6-2fb6f3f3fee0)
+![Alt text](https://github.com/user-attachments/assets/e8411090-68bb-4af7-89f6-062f671ad403)
+![Alt text](https://github.com/user-attachments/assets/5f5dec2f-af8c-416e-a59e-8da51ce14cfe)
+![Alt text](ttps://github.com/user-attachments/assets/add5b59b-c077-4437-afd0-2f5fcb2e61fd)
 
 # Requirements
 Should run on any OS. Must have python3.13 in your path. python3.13 --version or python --version
