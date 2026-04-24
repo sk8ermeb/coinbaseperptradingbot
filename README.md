@@ -1,12 +1,16 @@
 # coinbaseperptradingbot
-NOT READY FOR LIVE. Beta for everything else. Ready to build out algorithms and run backtesting 
-with an actual coinbase connection
+NOT READY FOR LIVE. Beta for everything else. Ready to build out algorithms and run backtesting with an actual coinbase connection. I am going to say this is permanantly for educational purposes only because I am just building this for myself. 
 ## Description
-A way to build a trading algorithm for coin base perpetual futures with backtesting
-
+A Web based tool to build trading algorihtms for Coinbase US perpetual futures advanced trade API. Has complete back testing capability. Should be a close approximation for live testing but of course bugs can happen and nuaonces around real time market data versus candles will always differ. 
+## Algorithm Developement
+Algorithms are built in python. See the wiki for complete requirements. There is a default example in the software of my understanding of a simple mean regression algorithn
 ![Alt text](https://github.com/user-attachments/assets/53f0838f-43a6-43f8-a8e6-2fb6f3f3fee0)
+## BackTesting
+Simply pick the script and time spand and let it run. The system will analyze for errors and show you all the results. See the wiki for a detailed analysis of how this works
 ![Alt text](https://github.com/user-attachments/assets/e8411090-68bb-4af7-89f6-062f671ad403)
 ![Alt text](https://github.com/user-attachments/assets/5f5dec2f-af8c-416e-a59e-8da51ce14cfe)
+## Live Trading
+Just pick your same script and hit play and let it keep track of the rest.
 ![Alt text](ttps://github.com/user-attachments/assets/add5b59b-c077-4437-afd0-2f5fcb2e61fd)
 
 # Requirements
@@ -22,13 +26,11 @@ run ./setup.sh
 
 # Use case
 Open a browser and go 127.0.0.1:8080
-There are some settings in config.txt if you want to have TLS or login
+There are some settings in config.txt if you want to have TLS or login. 
 ## Coinbase Perpetuals
-This programs abstracts coinbase's trading into simple enter and exit long/shorts. In your algorithm you can either enter long, enter short, exit long, exit short. And within that you can create a market order, Limit Order (favorible movement) Stop order (unfavorible movement), or Bracket order (limit and stop combined). Each entry ties up your funds until it is filled. so if you have 1000usd and you create an entry long for 1000 you won't be able to create any other orders. But for exits it doesn't not tie up funds at all. Coinbase limits you to 500 total orders. You can only have one market position at a time, which is either positive (long) or negative (short) with coinbase. Two long entries that get filled with result in 1 long position that is a sum of the two. Exiting Long will neutralize your entire long position allowing you to move into a short position.  
-
-Coinbase doesn't use the notion of entry and exits for perpetuals. Under the hoos it works completely different which is why it is abstracted to make writing algorithms more reasonable. When you buy it just enters a long position and a sell you enter a short postion. So it ties up fund to sell just like buy. But if you currently have a long position then a sell will by an exit, and if the sell exceeds your current positon it will exit all of your longs and enter into a short postion in the same transaction. But of course it does change if it ties up your funds, so the trading software needs to keep track of all that to have it execute correctly. There is a special flag that they have for perpetuals called reduce-only = true that will ensure that transaction does not increase or open a new postion. This will ensure that the limit/stop/bracket order doesn't accidentally tie up your funds when attempting to exit the position.  
+This Program only work with US coinbase perpetual futures. At this point only bitcoin and etherium are available. You definitely need to understand how perpetual futures work to make sense of this. Most importantly how trading on margin works. Coinbase only has buy and sell to move contracts from one direction to another. This programs abstracts that into Buy, Sell, and Exit. Buying enters long, Sell enters short, Exit exits the current contract. This program also has implemented trailing limit and stop orders. These are not available on coinbase so the engine handles it but tracking market movement every tick and re-adjusting limit and stop orders. The simulation should also handle leverages liquidation events the same so you can make smart decisions about how much leverage is appropriate for a certain strategy. 
 ## Indicators
-Your algorithm scripts will have acces to all the TA lib indiators (everything you can imagine). You can also write your own custom indicators. The trading scripts are in python. Your script just needs to have a single indicators function if you want to use it.
+Indicators are calculated once over the the time frame in back testing. So any code you put in the indicators function will only happen once before the simulation runs on the historical candles. So put as much as you can in this part. Technically you could calculate all your indicators just the same in tick() but then that would be a low slower. 
 ```python
 def indicators():
   sma_5 = talib.SMA(closes, timeperiod=10)
@@ -36,7 +38,7 @@ def indicators():
   return {'mysma':mysma, 'sma5':sma_5}
 ```
 ## Trade Events
-The entire program trading simulator operates on trade events. Each tick you can return as many as you want. The backtest will indicate an event that was requested by the user's algorithm, one that actually would have been created if all the exchange requirements were met, and any open order that would have been filled if market conditions were met. You have access to the candle data with candle['close'] or open, high, low, timestamp. You also have access to historicle data with candles[-1]. You also have access to volume and volumes[]. also opens[] closes[] highs[] lows[]. So technically you don't need indicators at all, you could do everything in tick. history size is 100 ticks. Addtional variables are makerfee, takerfee, pendingpositions[], time, usd, btc, eth. 
+The entire program trading simulator operates on trade events. Each tick you can return as many as you want. The backtest will indicate an event that was requested by the user's algorithm, one that actually would have been created if all the exchange requirements were met, and any open order that would have been filled if market conditions were met. You have access to the candle data with candle['close'] or open, high, low, timestamp. You also have access to historicle data with candles[-1]. You also have access to volume and volumes[]. also opens[] closes[] highs[] lows[]. So technically you don't need indicators at all, you could do everything in tick. history size is 300 ticks to match coinbase. See the wiki for a complete list of variable available and all the TradeOrder arguments. 
 ```python
 def tick():
   mysma = calcinds['mysma']
@@ -45,7 +47,7 @@ def tick():
   if(diff is nan):
     return []
   if(diff > 0.01):
-    return [TradeOrder(tradetype=TradeType.EnterLong, amount=100, limitprice=90000)]
+    return [TradeOrder(tradetype=TradeType.Buy, amount=0, limitprice=90000)]
   return []
 ```
 ## Full Script
