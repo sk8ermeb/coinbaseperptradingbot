@@ -16,6 +16,7 @@ let markersPrimitive;
 let picker1;
 let picker2;
 let chartindicators = {}
+let indicatorColorMap = {}
 let candleslist = [];
 let subPanes = [];
 let eventlist = [];
@@ -273,6 +274,8 @@ function clearseries(){
     try { chart.removePane(pane.paneIndex()); } catch(e) {}
   }
   subPanes = [];
+  indicatorColorMap = {};
+  document.getElementById('indicator-legend').innerHTML = '';
 }
 function setseries(candles){
   let bars = [];
@@ -406,15 +409,12 @@ picker1 = new tempusDominus.TempusDominus(document.getElementById('datetimepicke
 function addindicators(indicators){
   let j = 0;
 
-  // Detect price scale so we can tell oscillators apart from price-scale indicators.
-  // Any indicator whose values are all < 5% of the current close belongs in a sub-pane.
   const lastClose = candleslist.length > 0 ? candleslist[candleslist.length - 1].close : 0;
   let subPane = null;
 
   for (const ind in indicators){
     const data = indicators[ind];
 
-    // Auto-detect oscillator: all non-null values are tiny compared to price
     let isOscillator = false;
     if (lastClose > 0 && data.length > 0) {
       const vals = data.map(d => Math.abs(d.value)).filter(v => v != null && isFinite(v));
@@ -423,7 +423,7 @@ function addindicators(indicators){
       }
     }
 
-    let targetPaneIndex = undefined; // undefined → main (candle) pane
+    let targetPaneIndex = undefined;
     if (isOscillator) {
       if (!subPane) {
         subPane = chart.addPane();
@@ -432,8 +432,9 @@ function addindicators(indicators){
       targetPaneIndex = subPane.paneIndex();
     }
 
+    const color = colors[j];
     let indicatorseries = chart.addSeries(LightweightCharts.LineSeries, {
-      color: colors[j],
+      color: color,
       lineWidth: 2,
       priceScaleId: 'right',
       title: ind
@@ -441,8 +442,38 @@ function addindicators(indicators){
 
     indicatorseries.setData(data);
     chartindicators[ind] = indicatorseries;
+    indicatorColorMap[ind] = color;
     j++;
     if(j >= colors.length) j = 0;
+  }
+  renderIndicatorLegend();
+}
+
+function renderIndicatorLegend() {
+  const legend = document.getElementById('indicator-legend');
+  legend.innerHTML = '';
+  for (const name in chartindicators) {
+    const color = indicatorColorMap[name] || '#ffffff';
+    const label = document.createElement('label');
+    label.style.cssText = 'display:flex;align-items:center;gap:4px;cursor:pointer;font-size:0.78rem;white-space:nowrap;';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = true;
+    cb.onchange = () => toggleIndicator(name, cb);
+    const swatch = document.createElement('span');
+    swatch.style.cssText = `display:inline-block;width:10px;height:10px;background:${color};border-radius:2px;flex-shrink:0;`;
+    label.appendChild(cb);
+    label.appendChild(swatch);
+    label.appendChild(document.createTextNode(name));
+    legend.appendChild(label);
+  }
+}
+
+function toggleIndicator(name, checkbox) {
+  const series = chartindicators[name];
+  if (series) {
+    series.applyOptions({ visible: checkbox.checked });
+    chart.timeScale().fitContent();
   }
 }
 document.getElementById('simlog').innerHTML = "Log<br>Files";

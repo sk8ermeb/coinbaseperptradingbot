@@ -646,6 +646,9 @@ class Simulation:
                 sutil.runupdate("UPDATE exchangesim SET log=?, status=? WHERE id=?", (error, -1, self.simid))
                 return False
 
+            # Sync positions in case cancel_order was called during tick()
+            positions = self.namespace['pendingpositions']
+
             # Process the events returned by the user's tick function
             for event in events:
                 amount = event.amount

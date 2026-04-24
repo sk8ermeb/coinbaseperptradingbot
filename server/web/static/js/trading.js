@@ -1,6 +1,7 @@
 
 let chart, candleSeries, markersPrimitive;
 let chartindicators = {};
+let indicatorColorMap = {};
 let candleslist = [];
 let colors = ['#FF11FF','#11FFFF','#FFFF11','#AAAAFF','#AAFFAA','#FFAAAA','#FFFFFF','#AAAAAA'];
 let pollTimer = null;
@@ -205,16 +206,49 @@ function setChartIndicators(indicators) {
     chart.removeSeries(chartindicators[name]);
     delete chartindicators[name];
   }
+  indicatorColorMap = {};
+  document.getElementById('indicator-legend').innerHTML = '';
   let j = 0;
   for (const name in indicators) {
+    const color = colors[j % colors.length];
     const series = chart.addSeries(LightweightCharts.LineSeries, {
-      color: colors[j % colors.length], lineWidth: 2,
+      color: color, lineWidth: 2,
       priceScaleId: 'right', title: name,
     });
     const data = (indicators[name] || []).filter(e => e.value !== null && !isNaN(e.value));
     series.setData(data);
     chartindicators[name] = series;
+    indicatorColorMap[name] = color;
     j++;
+  }
+  renderIndicatorLegend();
+}
+
+function renderIndicatorLegend() {
+  const legend = document.getElementById('indicator-legend');
+  legend.innerHTML = '';
+  for (const name in chartindicators) {
+    const color = indicatorColorMap[name] || '#ffffff';
+    const label = document.createElement('label');
+    label.style.cssText = 'display:flex;align-items:center;gap:4px;cursor:pointer;font-size:0.78rem;white-space:nowrap;';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = true;
+    cb.onchange = () => toggleIndicator(name, cb);
+    const swatch = document.createElement('span');
+    swatch.style.cssText = `display:inline-block;width:10px;height:10px;background:${color};border-radius:2px;flex-shrink:0;`;
+    label.appendChild(cb);
+    label.appendChild(swatch);
+    label.appendChild(document.createTextNode(name));
+    legend.appendChild(label);
+  }
+}
+
+function toggleIndicator(name, checkbox) {
+  const series = chartindicators[name];
+  if (series) {
+    series.applyOptions({ visible: checkbox.checked });
+    chart.timeScale().fitContent();
   }
 }
 
