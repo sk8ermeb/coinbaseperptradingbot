@@ -59,7 +59,7 @@ async function loadSimResults(simid, scriptid) {
     setseries(data.candles);
     addindicators(data.indicators);
     setevents(data.events);
-    displayStats(computeStats(data.candles, data.leverage));
+    displayStats(computeStats(data.candles, data.leverage, data.events));
     chart.timeScale().fitContent();
     if (scriptid) loadSimHistory(scriptid);
   } else {
@@ -195,7 +195,7 @@ function setevents(events){
   applyEventFilters();
 }
 
-function computeStats(candles, leverage) {
+function computeStats(candles, leverage, events) {
   if (!candles || candles.length === 0) return null;
   const first = candles[0];
   const last  = candles[candles.length - 1];
@@ -227,7 +227,10 @@ function computeStats(candles, leverage) {
   const pcts = trades.map(t => (t.close - t.open) / Math.abs(t.open) * 100);
   const avgPct = pcts.length > 0 ? pcts.reduce((a, b) => a + b, 0) / pcts.length : 0;
   const totalPct = startEquity > 0 ? (finalEquity - startEquity) / startEquity * 100 : 0;
-  return { startEquity, finalEquity, finalUSD, leverage: leverage || '—', totalTrades, profitableTrades, avgPct, totalPct };
+  const totalFees = (events || [])
+    .filter(e => e.eventtype.startsWith('fill:'))
+    .reduce((sum, e) => sum + (parseFloat(e.fee) || 0), 0);
+  return { startEquity, finalEquity, finalUSD, leverage: leverage || '—', totalTrades, profitableTrades, avgPct, totalPct, totalFees };
 }
 
 function displayStats(stats) {
@@ -256,6 +259,8 @@ function displayStats(stats) {
             <td class="text-end fw-bold">${stats.profitableTrades} <span class="text-muted fw-normal">(${profitPct})</span></td></tr>
         <tr><td class="text-muted">Avg Gain/Trade</td>
             <td class="text-end fw-bold ${avgColor}">${stats.avgPct.toFixed(2)}%</td></tr>
+        <tr><td class="text-muted">Total Fees Paid</td>
+            <td class="text-end fw-bold text-danger">$${stats.totalFees.toFixed(2)}</td></tr>
         <tr><td colspan="2"><hr class="my-1"></td></tr>
         <tr><td class="text-muted">Total Return</td>
             <td class="text-end fw-bold ${totalColor}">${stats.totalPct.toFixed(2)}%</td></tr>
@@ -523,7 +528,7 @@ async function onHistoryChange(select) {
   setseries(data.candles);
   addindicators(data.indicators);
   setevents(data.events);
-  displayStats(computeStats(data.candles, data.leverage));
+  displayStats(computeStats(data.candles, data.leverage, data.events));
   chart.timeScale().fitContent();
 }
 

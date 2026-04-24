@@ -347,6 +347,7 @@ class Simulation:
             close = self.namespace['close']
             high = self.namespace['high']
             low = self.namespace['low']
+            candle_open = float(candle['open'])
             mark = float(candle['close'])
 
             # Update trailing limit/stop prices before fill checking
@@ -463,9 +464,12 @@ class Simulation:
                 if ordertype == util.OrderType.Limit.name or ordertype == util.OrderType.Bracket.name:
                     if tradetype == util.TradeType.Buy.name:
                         if low <= limitprice:
+                            # If the candle opened at or below the limit, the order would have
+                            # crossed the spread immediately and been charged taker fee.
+                            limit_fill_fee = takerfee if candle_open <= limitprice else makerfee
                             if self.namespace['realposition'] < 0:
                                 liquid = abs(self.namespace['realposition'])
-                                newprice, newamount, newusd, fee, notional = self.updatecostbasis(limitprice, liquid, makerfee)
+                                newprice, newamount, newusd, fee, notional = self.updatecostbasis(limitprice, liquid, limit_fill_fee)
                                 sutil.simlog("Buy limit: closing short first"+
                                              f"<br>&nbsp;&nbsp;&nbsp;Id: {positionid}"+
                                              f"<br>&nbsp;&nbsp;&nbsp;Limit Price:{limitprice}"+
@@ -474,7 +478,7 @@ class Simulation:
                                              f"<br>&nbsp;&nbsp;&nbsp;USD Balance:${newusd}"
                                              + self.margin_log_suffix(mark))
                             crypt = amount / limitprice
-                            newprice, newamount, newusd, fee, notional = self.updatecostbasis(limitprice, crypt, makerfee)
+                            newprice, newamount, newusd, fee, notional = self.updatecostbasis(limitprice, crypt, limit_fill_fee)
                             sutil.simlog("Buy Limit filled — entering long"+
                                          f"<br>&nbsp;&nbsp;&nbsp;Id: {positionid}"+
                                          f"<br>&nbsp;&nbsp;&nbsp;Limit Price:{limitprice}"+
@@ -489,9 +493,11 @@ class Simulation:
                             filled = True
                     elif tradetype == util.TradeType.Sell.name:
                         if high >= limitprice:
+                            # If the candle opened at or above the limit, taker fee applies.
+                            limit_fill_fee = takerfee if candle_open >= limitprice else makerfee
                             if self.namespace['realposition'] > 0:
                                 liquid = self.namespace['realposition']
-                                newprice, newamount, newusd, fee, notional = self.updatecostbasis(limitprice, -liquid, makerfee)
+                                newprice, newamount, newusd, fee, notional = self.updatecostbasis(limitprice, -liquid, limit_fill_fee)
                                 sutil.simlog("Sell limit: closing long first"+
                                              f"<br>&nbsp;&nbsp;&nbsp;Id: {positionid}"+
                                              f"<br>&nbsp;&nbsp;&nbsp;Limit Price:{limitprice}"+
@@ -500,7 +506,7 @@ class Simulation:
                                              f"<br>&nbsp;&nbsp;&nbsp;USD Balance:${newusd}"
                                              + self.margin_log_suffix(mark))
                             crypt = -(amount / limitprice)
-                            newprice, newamount, newusd, fee, notional = self.updatecostbasis(limitprice, crypt, makerfee)
+                            newprice, newamount, newusd, fee, notional = self.updatecostbasis(limitprice, crypt, limit_fill_fee)
                             sutil.simlog("Sell Limit filled — entering short"+
                                          f"<br>&nbsp;&nbsp;&nbsp;Id: {positionid}"+
                                          f"<br>&nbsp;&nbsp;&nbsp;Limit Price:{limitprice}"+
@@ -523,7 +529,13 @@ class Simulation:
                         elif (cur_pos > 0 and high >= limitprice) or (cur_pos < 0 and low <= limitprice):
                             close_qty = abs(cur_pos) if amount == 0 else amount
                             crypt = -close_qty if cur_pos > 0 else close_qty
-                            newprice, newamount, newusd, fee, notional = self.updatecostbasis(limitprice, crypt, makerfee)
+                            # Long exit limit is above market; short exit limit is below market.
+                            # If candle opened past the limit, it crossed immediately → taker fee.
+                            if cur_pos > 0:
+                                limit_fill_fee = takerfee if candle_open >= limitprice else makerfee
+                            else:
+                                limit_fill_fee = takerfee if candle_open <= limitprice else makerfee
+                            newprice, newamount, newusd, fee, notional = self.updatecostbasis(limitprice, crypt, limit_fill_fee)
                             direction = "Long" if cur_pos > 0 else "Short"
                             sutil.simlog(f"Exit {direction} Limit filled"+
                                          f"<br>&nbsp;&nbsp;&nbsp;Id: {positionid}"+
