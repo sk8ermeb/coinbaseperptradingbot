@@ -281,15 +281,25 @@ class LiveTrader:
         # Portfolio summary (buying power / free margin)
         try:
             ports = client.list_portfolios().to_dict().get('portfolios', [])
+            port_types = [p.get('type') for p in ports]
+            self._livelog(f"Portfolios found: {port_types}")
             intx = next((p for p in ports if p.get('type') == 'INTX'), None)
-            if intx:
+            if intx is None:
+                self._livelog(
+                    "No INTX portfolio found — transfer funds to your Perpetuals portfolio "
+                    "in Coinbase Advanced Trade to see free margin here."
+                )
+            else:
                 port_uuid = intx['uuid']
                 summary = client.get_portfolio_summary(port_uuid).to_dict()
                 bp = summary.get('buying_power', {})
+                self._livelog(f"INTX portfolio summary keys: {list(summary.keys())}")
                 self.namespace['usd'] = float(bp.get('value', 0)) if isinstance(bp, dict) else 0.0
 
                 # Open positions
                 pos_resp = client.get_portfolio_balances(port_uuid).to_dict()
+                self._livelog(f"INTX balances keys: {list(pos_resp.keys())}")
+                found_pos = False
                 for pos in pos_resp.get('balances', []):
                     if product_id in str(pos.get('asset', '')):
                         self.namespace['realposition'] = float(pos.get('quantity', 0))
@@ -299,10 +309,12 @@ class LiveTrader:
                         self._livelog(f"Position: {self.namespace['realposition']} contracts "
                                       f"@ {self.namespace['costbasis']:.2f} | "
                                       f"Free margin: ${self.namespace['usd']:.2f}")
+                        found_pos = True
                         break
-                else:
+                if not found_pos:
                     self.namespace['realposition'] = 0.0
                     self.namespace['costbasis'] = 0.0
+                    self._livelog(f"No open position for {product_id} | Free margin: ${self.namespace['usd']:.2f}")
         except Exception:
             self._livelog(f"Portfolio read error:\n{traceback.format_exc()}")
 
