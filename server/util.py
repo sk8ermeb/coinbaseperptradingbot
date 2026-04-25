@@ -445,6 +445,8 @@ class util:
         timebase = 0
         product_id = pair
         client = self.getclient()
+        if client is None:
+            return []
         candles = self.runselect("SELECT * FROM candle WHERE duration=? and pair=? ORDER BY timestamp LIMIT 1", (granularity, pair))
         if(len(candles)> 0):
             timebase = candles[0]['timestamp']
