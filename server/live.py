@@ -32,6 +32,7 @@ class LiveTrader:
         self._ind_history = {}
         self._max_base_size = None
         self._min_base_size = None
+        self._base_increment = None
 
     # ------------------------------------------------------------------ startup
 
@@ -477,15 +478,29 @@ class LiveTrader:
             product = client.get_product(product_id).to_dict()
             self._max_base_size = float(product.get('base_max_size') or 0) or None
             self._min_base_size = float(product.get('base_min_size') or 0) or None
-            self._livelog(f"Product limits — max_base_size:{self._max_base_size} min_base_size:{self._min_base_size}")
+            self._base_increment = float(product.get('base_increment') or 0) or None
+            self._livelog(
+                f"Product limits — min:{self._min_base_size} max:{self._max_base_size} "
+                f"increment:{self._base_increment} (all in BTC for BTC-PERP-INTX)"
+            )
         except Exception:
             self._livelog(f"Could not load product limits:\n{traceback.format_exc()}")
 
+    def _round_to_increment(self, size: float) -> float:
+        """Round size down to the nearest valid base_increment."""
+        inc = getattr(self, '_base_increment', None)
+        if not inc or inc <= 0:
+            return round(size, 8)
+        # Use integer arithmetic to avoid floating-point drift
+        factor = round(1 / inc)
+        return math.floor(size * factor) / factor
+
     def _cap_base_size(self, base_size_f):
-        """Clamp base_size to exchange limits. Returns float."""
+        """Round to exchange increment, then clamp to exchange limits. Returns float."""
+        base_size_f = self._round_to_increment(base_size_f)
         if self._max_base_size and base_size_f > self._max_base_size:
             self._livelog(f"base_size {base_size_f} capped to max {self._max_base_size}")
-            base_size_f = self._max_base_size
+            base_size_f = self._round_to_increment(self._max_base_size)
         if self._min_base_size and base_size_f < self._min_base_size:
             self._livelog(f"base_size {base_size_f} below min {self._min_base_size} — order skipped")
             return 0.0
@@ -565,7 +580,8 @@ class LiveTrader:
                     self._livelog("Exit requested but no open position")
                     return
                 close_qty = abs(pos) if amount == 0 else amount
-                base_size = str(round(close_qty, 8))
+                close_qty = self._round_to_increment(close_qty)
+                base_size = str(close_qty)
                 if limitprice > 0:
                     if pos > 0:
                         resp = client.limit_order_gtc_sell(order_id, product_id, base_size, str(round(limitprice, 2)))
