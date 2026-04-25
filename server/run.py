@@ -1,7 +1,7 @@
 # server.py
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 import os
 from datetime import datetime, timedelta
 from api import router
@@ -126,6 +126,16 @@ async def trading(request: Request):
     resp['scripts'] = res if res else []
     resp['granularities'] = live_module.GRANULARITIES
     return templates.TemplateResponse("trading.html", resp)
+
+
+@app.get("/Logout")
+async def logout(request: Request):
+    session_id = request.cookies.get("session")
+    if session_id:
+        myutil.runupdate("DELETE FROM sessions WHERE sessionid=?", (session_id,))
+    response = RedirectResponse(url="/", status_code=302)
+    response.delete_cookie("session")
+    return response
 
 
 @app.get("/algorithms")
