@@ -393,7 +393,7 @@ class util:
                     if ":" in ls and not ls.startswith("#"):
                         strparts = ls.split(":")
                         try:
-                            self.configs[strparts[0].strip().lower()] = strparts[1].strip().lower()
+                            self.configs[strparts[0].strip().lower()] = strparts[1].strip()
                         except:
                             print("ERROR: Problem with config file on \n"+ls)
 
