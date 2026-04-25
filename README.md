@@ -1,7 +1,8 @@
 # coinbaseperptradingbot
 NOT READY FOR LIVE. Beta for everything else. Ready to build out algorithms and run backtesting with an actual coinbase connection. I am going to say this is permanantly for educational purposes only because I am just building this for myself. 
 ## Description
-A Web based tool to build trading algorihtms for Coinbase US perpetual futures advanced trade API. Has complete back testing capability. Should be a close approximation for live testing but of course bugs can happen and nuaonces around real time market data versus candles will always differ. 
+A Web based tool to build trading algorihtms for Coinbase US perpetual futures advanced trade API. Has complete back testing capability. Should be a close approximation for live testing but of course bugs can happen and nuaonces around real time market data versus candles will always differ. Complete documentation:
+[wiki](https://github.com/sk8ermeb/coinbaseperptradingbot/wiki)
 ## Algorithm Developement
 Algorithms are built in python. See the wiki for complete requirements. There is a default example in the software of my understanding of a simple mean regression algorithn
 ![Alt text](https://github.com/user-attachments/assets/53f0838f-43a6-43f8-a8e6-2fb6f3f3fee0)
