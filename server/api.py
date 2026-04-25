@@ -307,13 +307,18 @@ async def live_candles(session: str = Depends(require_session),
     gran_secs = live_module.GRAN_SECONDS.get(use_gran, 3600)
     import time as _time
     now = int(_time.time())
-    start = now - 200 * gran_secs
+    start = now - 1000 * gran_secs
     candles = autil.gethistoricledata(use_gran, product_id, start, now)
 
     indicators = {}
     if trader and trader._ind_history:
+        import math as _math
         for name, entries in trader._ind_history.items():
-            indicators[name] = entries
+            indicators[name] = [
+                {'time': e['time'], 'value': e['value']}
+                for e in entries
+                if not _math.isnan(e['value']) and not _math.isinf(e['value'])
+            ]
 
     return JSONResponse({'candles': candles, 'indicators': indicators})
 

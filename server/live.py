@@ -25,7 +25,7 @@ class LiveTrader:
         self.running = False
         self.thread = None
         self.namespace = {}
-        self.historysize = 300
+        self.historysize = 1000
         self.pair = 'btc'
         self.granularity = 'ONE_HOUR'
         self.candle_history = []
@@ -107,6 +107,7 @@ class LiveTrader:
 
         self._load_history(product_id)
         self._load_product_limits(product_id)
+        self._read_account_state(product_id)
         self._livelog("History loaded — waiting for next candle close")
 
         while self.running:
@@ -219,23 +220,37 @@ class LiveTrader:
         start = now - (self.historysize + 20) * gran_secs
         candles = lutil.gethistoricledata(self.granularity, product_id, start, now)
         candles = candles[-(self.historysize):]
+        ind_errors = 0
+        first_ind_error = None
         for candle in candles:
             self._update_namespace_candle(candle)
             if 'indicators' in self.namespace:
                 try:
                     inds = self.namespace['indicators']()
                     self._store_ind_history(candle['timestamp'], inds)
-                except Exception:
-                    pass
+                except Exception as e:
+                    ind_errors += 1
+                    if first_ind_error is None:
+                        first_ind_error = traceback.format_exc()
         self._rebuild_calcinds()
-        self._livelog(f"Preloaded {len(candles)} candles")
+        ind_count = sum(len(v) for v in self._ind_history.values())
+        self._livelog(
+            f"Preloaded {len(candles)} candles | "
+            f"indicators: {list(self._ind_history.keys())} ({ind_count} points, {ind_errors} errors)"
+        )
+        if first_ind_error:
+            self._livelog(f"First indicator error:\n{first_ind_error}")
 
     def _store_ind_history(self, ts, inds):
         if not inds:
             return
         for name, val in inds.items():
-            arr = numpy.array(val, dtype=float) if hasattr(val, '__iter__') else numpy.array([val], dtype=float)
-            last = float(arr[-1]) if len(arr) > 0 else numpy.nan
+            if not hasattr(val, '__iter__'):
+                val = [val]
+            arr = numpy.array(val, dtype=float)
+            # flatten handles multi-output indicators (e.g. BBANDS returns shape (3, N))
+            flat = arr.flatten()
+            last = float(flat[-1]) if len(flat) > 0 else numpy.nan
             self._ind_history.setdefault(name, []).append({'time': ts, 'value': last})
 
     def _rebuild_calcinds(self):
@@ -278,49 +293,51 @@ class LiveTrader:
             self._livelog("No Coinbase client — check credentials in Settings")
             return
 
-        # Portfolio summary (buying power / free margin)
+        # Portfolio summary (buying power / free margin) via CFM futures balance
         try:
-            ports = client.list_portfolios().to_dict().get('portfolios', [])
-            port_types = [p.get('type') for p in ports]
-            self._livelog(f"Portfolios found: {port_types}")
-            intx = next((p for p in ports if p.get('type') == 'INTX'), None)
-            if intx is None:
-                self._livelog(
-                    "No INTX portfolio found — transfer funds to your Perpetuals portfolio "
-                    "in Coinbase Advanced Trade to see free margin here."
-                )
-            else:
-                port_uuid = intx['uuid']
-                summary = client.get_portfolio_summary(port_uuid).to_dict()
-                bp = summary.get('buying_power', {})
-                self._livelog(f"INTX portfolio summary keys: {list(summary.keys())}")
-                self.namespace['usd'] = float(bp.get('value', 0)) if isinstance(bp, dict) else 0.0
+            bal = client.get_futures_balance_summary().to_dict().get('balance_summary', {})
+            self._livelog(f"Futures balance summary raw: {bal}")
 
-                # Open positions
-                pos_resp = client.get_portfolio_balances(port_uuid).to_dict()
-                self._livelog(f"INTX balances keys: {list(pos_resp.keys())}")
-                found_pos = False
-                for pos in pos_resp.get('balances', []):
-                    if product_id in str(pos.get('asset', '')):
-                        self.namespace['realposition'] = float(pos.get('quantity', 0))
-                        self.namespace['costbasis'] = float(pos.get('cost_basis', {}).get('value', 0)
-                                                             if isinstance(pos.get('cost_basis'), dict)
-                                                             else pos.get('cost_basis', 0))
-                        self._livelog(f"Position: {self.namespace['realposition']} contracts "
-                                      f"@ {self.namespace['costbasis']:.2f} | "
-                                      f"Free margin: ${self.namespace['usd']:.2f}")
-                        found_pos = True
-                        break
-                if not found_pos:
-                    self.namespace['realposition'] = 0.0
-                    self.namespace['costbasis'] = 0.0
-                    self._livelog(f"No open position for {product_id} | Free margin: ${self.namespace['usd']:.2f}")
+            def _amount(key):
+                v = bal.get(key, {})
+                return float(v.get('value', 0) if isinstance(v, dict) else v or 0)
+
+            available = _amount('available_margin')
+            buying_power = _amount('futures_buying_power')
+            self.namespace['usd'] = available if available > 0 else buying_power
+            self._livelog(f"Available margin: ${self.namespace['usd']:.2f} | "
+                          f"Buying power: ${buying_power:.2f} | "
+                          f"Unrealized PnL: ${_amount('unrealized_pnl'):.2f}")
         except Exception:
-            self._livelog(f"Portfolio read error:\n{traceback.format_exc()}")
+            self._livelog(f"Futures balance read error:\n{traceback.format_exc()}")
+
+        # Open position via CFM futures position endpoint
+        try:
+            pos_resp = client.get_futures_position(product_id).to_dict()
+            pos = pos_resp.get('position') or {}
+            contracts = float(pos.get('number_of_contracts', 0) or 0)
+            side = pos.get('side', '')
+            if side == 'SHORT':
+                contracts = -contracts
+            avg_entry = float(pos.get('avg_entry_price', 0) or 0)
+            self.namespace['realposition'] = contracts
+            self.namespace['costbasis'] = avg_entry
+            self._livelog(f"Position: {contracts} contracts @ {avg_entry:.2f} | "
+                          f"Free margin: ${self.namespace['usd']:.2f}")
+        except Exception as e:
+            if 'NoneType' in str(e):
+                # No open position — not an error
+                self.namespace['realposition'] = 0.0
+                self.namespace['costbasis'] = 0.0
+                self._livelog(f"No open position | Free margin: ${self.namespace['usd']:.2f}")
+            else:
+                self._livelog(f"Position read error:\n{traceback.format_exc()}")
+                self.namespace['realposition'] = 0.0
+                self.namespace['costbasis'] = 0.0
 
         # Open orders → pendingpositions for script
         try:
-            open_orders = client.list_orders(product_id=product_id, order_status=['OPEN', 'PENDING']).to_dict()
+            open_orders = client.list_orders(product_id=product_id, order_status=['OPEN']).to_dict()
             orders_list = open_orders.get('orders', [])
 
             # Reconcile liveorder table: mark anything no longer open on Coinbase as filled

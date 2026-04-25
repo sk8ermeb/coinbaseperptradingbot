@@ -2,6 +2,7 @@
 let chart, candleSeries, markersPrimitive;
 let chartindicators = {};
 let indicatorColorMap = {};
+let subPanes = [];
 let candleslist = [];
 let colors = ['#FF11FF','#11FFFF','#FFFF11','#AAAAFF','#AAFFAA','#FFAAAA','#FFFFFF','#AAAAAA'];
 let pollTimer = null;
@@ -206,16 +207,37 @@ function setChartIndicators(indicators) {
     chart.removeSeries(chartindicators[name]);
     delete chartindicators[name];
   }
+  for (const pane of subPanes) {
+    try { chart.removePane(pane.paneIndex()); } catch(e) {}
+  }
+  subPanes = [];
   indicatorColorMap = {};
   document.getElementById('indicator-legend').innerHTML = '';
+
+  const lastClose = candleslist.length > 0 ? candleslist[candleslist.length - 1].close : 0;
+  let subPane = null;
   let j = 0;
+
   for (const name in indicators) {
     const color = colors[j % colors.length];
+    const data = (indicators[name] || []).filter(e => e.value !== null && !isNaN(e.value));
+
+    let targetPaneIndex = undefined;
+    if (lastClose > 0 && data.length > 0) {
+      const vals = data.map(d => Math.abs(d.value)).filter(v => isFinite(v));
+      if (vals.length > 0 && Math.max(...vals) < lastClose * 0.05) {
+        if (!subPane) {
+          subPane = chart.addPane();
+          subPanes.push(subPane);
+        }
+        targetPaneIndex = subPane.paneIndex();
+      }
+    }
+
     const series = chart.addSeries(LightweightCharts.LineSeries, {
       color: color, lineWidth: 2,
       priceScaleId: 'right', title: name,
-    });
-    const data = (indicators[name] || []).filter(e => e.value !== null && !isNaN(e.value));
+    }, targetPaneIndex);
     series.setData(data);
     chartindicators[name] = series;
     indicatorColorMap[name] = color;
