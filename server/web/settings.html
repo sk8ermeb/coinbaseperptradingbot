@@ -5,19 +5,25 @@
 {% block content %}
 <div class="border border-3 border-primary rounded-4 shadow-lg p-3 m-3 bg-white">
   <label for="cbkey" class="form-label">Coinbase Key</label>
-  <input type="password" class="form-control" id="cbkey" placeholder="Enter Coinbase Key" value="{{ cbkey }}" required>
+  <input type="password" class="form-control" id="cbkey"
+         placeholder="Enter Coinbase Key"
+         data-configured="{{ 'true' if cbkey_set else 'false' }}"
+         required>
   <button type="button"
           class="btn btn-primary mt-3"
-          onclick="saveSetting('cbkey', document.getElementById('cbkey').value)">
+          onclick="saveCredential('cbkey')">
     Save
   </button>
 </div>
 <div class="border border-3 border-primary rounded-4 shadow-lg p-3 m-3 bg-white">
-  <label for="cbsecret" class="form-label">Coinabse Secret</label>
-  <input type="password" class="form-control" id="cbsecret" placeholder="Enter Coinbase Secret" value="{{ cbsecret }}" required>
+  <label for="cbsecret" class="form-label">Coinbase Secret</label>
+  <input type="password" class="form-control" id="cbsecret"
+         placeholder="Enter Coinbase Secret"
+         data-configured="{{ 'true' if cbsecret_set else 'false' }}"
+         required>
   <button type="button"
           class="btn btn-primary mt-3"
-          onclick="saveSetting('cbsecret', document.getElementById('cbsecret').value)">
+          onclick="saveCredential('cbsecret')">
     Save
   </button>
 </div>

@@ -105,14 +105,8 @@ async def root(request: Request):
         anon = myutil.getconfig('anonymous')
         if anon == 'true':
             resp['anon'] = True
-    cbkey = myutil.getkeyval('cbkey')
-    cbsecret = myutil.getkeyval('cbsecret')
-    if cbkey is None:
-        cbkey = ""
-    if cbsecret is None:
-        cbsecret = ""
-    resp['cbkey'] = cbkey
-    resp['cbsecret'] = cbsecret
+    resp['cbkey_set'] = bool(myutil.getkeyval('cbkey'))
+    resp['cbsecret_set'] = bool(myutil.getkeyval('cbsecret'))
     return templates.TemplateResponse(
         "settings.html", resp
     )
