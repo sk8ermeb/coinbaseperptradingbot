@@ -83,7 +83,12 @@ async function runScript() {
     showMessage('You must first create a script to run in the algorithms tab (can be blank)');
     return;
   }
-  if (!picker1 || picker1.dates.picked.length === 0) return;
+  const startDate = picker1?.dates.picked[0] ?? picker1?.viewDate;
+  const stopDate  = picker2?.dates.picked[0] ?? picker2?.viewDate;
+  if (!startDate || !stopDate) {
+    showMessage('Please select a start and end date');
+    return;
+  }
 
   document.getElementById('bstartsim').classList.add('d-none');
   document.getElementById('bstopsim').classList.remove('d-none');
@@ -91,8 +96,8 @@ async function runScript() {
   setSimProgress(0);
   currentScriptId = scriptid;
 
-  const start = pickerToUtc(picker1.dates.picked[0]);
-  const stop  = pickerToUtc(picker2.dates.picked[0]);
+  const start = pickerToUtc(startDate);
+  const stop  = pickerToUtc(stopDate);
 
   const response = await fetch('/api/startsim', {
     method: 'POST',

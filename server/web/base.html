@@ -20,7 +20,7 @@
           <li class="nav-item"><a class="nav-link" href="/settings">Settings</a></li>
           {% if not anon %}
             {% if user %}
-              <li class="nav-item"><a class="nav-link" href="/Logout">{{ user.name }} Logout</a></li>
+              <li class="nav-item"><a class="nav-link" href="/Logout">{{ user }} Logout</a></li>
             {% else %}
               <li class="nav-item">
                 <button type="button" class="nav-link btn btn-link" data-bs-toggle="modal" data-bs-target="#loginModal">
