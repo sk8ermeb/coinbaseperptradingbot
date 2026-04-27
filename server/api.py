@@ -96,6 +96,10 @@ async def fetchsim(session: str = Depends(require_session),
     # Fill events carry usdcurr/cryptcurr/costbasis in their eventdata.
     leverage_str = autil.getkeyval(f'sim_{simid}_leverage')
     sim_leverage = float(leverage_str) if leverage_str else 10.0
+    contract_size_str = autil.getkeyval(f'sim_{simid}_contract_size')
+    sim_contract_size = float(contract_size_str) if contract_size_str else None
+    base_increment_str = autil.getkeyval(f'sim_{simid}_base_increment')
+    sim_base_increment = float(base_increment_str) if base_increment_str else None
 
     fill_events = sorted(
         [e for e in simevents if e['eventtype'].startswith('fill:')],
@@ -128,7 +132,11 @@ async def fetchsim(session: str = Depends(require_session),
         candle['sim_contracts'] = round(running_contracts, 6)
         candle['sim_total_equity'] = round(running_usd + locked + upnl, 2)
 
-    response = JSONResponse({'candles':candles, 'assets': simassets, 'indicators':simindicators, 'events':simevents, 'log':simidres['log'], 'leverage': sim_leverage})
+    response = JSONResponse({
+        'candles': candles, 'assets': simassets, 'indicators': simindicators,
+        'events': simevents, 'log': simidres['log'], 'leverage': sim_leverage,
+        'contract_size': sim_contract_size, 'base_increment': sim_base_increment,
+    })
     return response
 
 @router.get("/simhistory")
@@ -323,30 +331,46 @@ async def live_candles(session: str = Depends(require_session),
     return JSONResponse({'candles': candles, 'indicators': indicators})
 
 
+@router.get("/live/balance")
+async def live_balance(session: str = Depends(require_session)):
+    from coinbase_http import CoinbaseHTTP
+    try:
+        cb = CoinbaseHTTP()
+        data = cb.get_balance_summary()
+        bal = data.get('balance_summary', {})
+        def _amount(key):
+            v = bal.get(key, {})
+            return float(v.get('value', 0) or 0)
+        available = _amount('available_margin')
+        buying_power = _amount('futures_buying_power')
+        usd = available if available > 0 else buying_power
+        total = _amount('total_usd_balance') or usd
+        unrealized = _amount('unrealized_pnl')
+        return JSONResponse({'usd': round(usd, 2), 'total_equity': round(total, 2), 'unrealized_pnl': round(unrealized, 2)})
+    except Exception:
+        return JSONResponse({'usd': 0, 'total_equity': 0, 'unrealized_pnl': 0})
+
+
 @router.get("/live/price")
 async def live_price(session: str = Depends(require_session)):
+    from coinbase_http import CoinbaseHTTP
     trader = live_module.get_trader()
     use_pair = (trader.pair if trader else None) or autil.getkeyval('live_pair') or 'btc'
     product_id = use_pair.upper() + '-PERP-INTX'
-    client = autil.getclient()
-    if client is None:
-        return JSONResponse({'price': 0})
     try:
-        resp = client.get_best_bid_ask(product_ids=[product_id])
-        pricebooks = resp.to_dict().get('pricebooks', [])
-        if pricebooks:
-            book = pricebooks[0]
-            bids = book.get('bids', [])
-            asks = book.get('asks', [])
-            if bids and asks:
-                price = (float(bids[0]['price']) + float(asks[0]['price'])) / 2
-            elif bids:
-                price = float(bids[0]['price'])
-            elif asks:
-                price = float(asks[0]['price'])
-            else:
-                price = 0
-            return JSONResponse({'price': round(price, 2)})
+        cb = CoinbaseHTTP()
+        product = cb.get_product(product_id)
+        bid = float(product.get('best_bid_price') or 0)
+        ask = float(product.get('best_ask_price') or 0)
+        if bid > 0 and ask > 0:
+            price = (bid + ask) / 2
+        elif bid > 0:
+            price = bid
+        elif ask > 0:
+            price = ask
+        else:
+            price = float(product.get('price') or 0)
+        return JSONResponse({'price': round(price, 2)})
     except Exception:
         pass
     return JSONResponse({'price': 0})

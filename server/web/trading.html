@@ -7,14 +7,19 @@
   <div class="row align-items-center g-2 flex-wrap">
 
     <div class="col-auto">
-      <select class="form-select" id="scriptDropdown" onchange="onScriptChange()">
-        {% if scripts %}
-          {% for script in scripts %}
-            <option value="{{ script.id }}">{{ script.name }}</option>
-          {% endfor %}
-        {% else %}
-          <option value="-1">No Scripts</option>
-        {% endif %}
+      <select class="form-select" id="productDropdown" onchange="onProductChange()">
+        <option value="btc">BTC-PERP-INTX</option>
+        <option value="eth">ETH-PERP-INTX</option>
+        <option value="sol">SOL-PERP-INTX</option>
+        <option value="xrp">XRP-PERP-INTX</option>
+        <option value="doge">DOGE-PERP-INTX</option>
+        <option value="ada">ADA-PERP-INTX</option>
+        <option value="paxg">PAXG-PERP-INTX</option>
+        <option value="zec">ZEC-PERP-INTX</option>
+        <option value="xlm">XLM-PERP-INTX</option>
+        <option value="link">LINK-PERP-INTX</option>
+        <option value="sui">SUI-PERP-INTX</option>
+        <option value="aave">AAVE-PERP-INTX</option>
       </select>
     </div>
 
@@ -27,21 +32,29 @@
     </div>
 
     <div class="col-auto">
-      <button id="bstart" class="btn btn-success rounded-circle d-flex align-items-center justify-content-center"
-          style="width:40px;height:40px;padding:0;" onclick="startTrading()">
-        <i class="bi bi-play-fill display-6" style="margin-left:3px;"></i>
-      </button>
-    </div>
+      <div class="d-flex align-items-center gap-2 border border-secondary rounded px-2 py-1">
+        <select class="form-select form-select-sm" id="scriptDropdown" onchange="onScriptChange()">
+          {% if scripts %}
+            {% for script in scripts %}
+              <option value="{{ script.id }}">{{ script.name }}</option>
+            {% endfor %}
+          {% else %}
+            <option value="-1">No Scripts</option>
+          {% endif %}
+        </select>
 
-    <div class="col-auto">
-      <button id="bstop" class="btn btn-danger rounded-circle d-flex align-items-center justify-content-center d-none"
-          style="width:40px;height:40px;padding:0;" onclick="stopTrading()">
-        <i class="bi bi-stop-fill"></i>
-      </button>
-    </div>
+        <button id="bstart" class="btn btn-success rounded-circle d-flex align-items-center justify-content-center flex-shrink-0"
+            style="width:40px;height:40px;padding:0;" onclick="startTrading()">
+          <i class="bi bi-play-fill display-6" style="margin-left:3px;"></i>
+        </button>
 
-    <div class="col-auto">
-      <span id="statusbadge" class="badge bg-secondary">Stopped</span>
+        <button id="bstop" class="btn btn-danger rounded-circle d-flex align-items-center justify-content-center d-none flex-shrink-0"
+            style="width:40px;height:40px;padding:0;" onclick="stopTrading()">
+          <i class="bi bi-stop-fill"></i>
+        </button>
+
+        <span id="statusbadge" class="badge bg-secondary text-nowrap">Stopped</span>
+      </div>
     </div>
 
     <div class="col-auto ms-auto text-muted small" id="lastupdate"></div>
@@ -85,6 +98,7 @@
                   <tr><th>Mark Price</th><td id="acc_price">—</td></tr>
                   <tr><th>Unrealized PnL</th><td id="acc_upnl">—</td></tr>
                   <tr><th>Leverage</th><td id="acc_lev">—</td></tr>
+                  <tr><th>Contract Size</th><td id="acc_contract_size">—</td></tr>
                   <tr><th>Pair</th><td id="acc_pair">—</td></tr>
                   <tr><th>Granularity</th><td id="acc_gran">—</td></tr>
                 </tbody>

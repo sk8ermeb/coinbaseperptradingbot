@@ -1,11 +1,12 @@
 import util
-from coinbase.rest import RESTClient
+from coinbase_http import CoinbaseHTTP
 from datetime import datetime
 import time
 import json
 import talib
 import numpy
 import traceback
+import math
 from enum import Enum
 sutil = util.util()
 import uuid
@@ -71,19 +72,60 @@ class Simulation:
         if('granularity' in self.namespace):
             self.granularity = self.namespace['granularity']
         historicalpair = self.pair.upper()+'-PERP-INTX'
-        print('BTC-PERP-INTX')
-        print(historicalpair)
-        self.simcandles = sutil.gethistoricledata(self.granularity, historicalpair, self.start, self.stop)
+
+        from coinbase_http import KNOWN_CONTRACT_SIZES, KNOWN_MAX_LEVERAGES
+        if self.good:
+            if historicalpair not in KNOWN_CONTRACT_SIZES:
+                supported = ', '.join(KNOWN_CONTRACT_SIZES.keys())
+                error = f"Unsupported product '{historicalpair}'.\nSupported products: {supported}"
+                self.good = False
+            else:
+                leverage = self.namespace.get('leverage', 10)
+                max_lev = KNOWN_MAX_LEVERAGES[historicalpair]
+                if leverage > max_lev:
+                    error = f"Leverage {leverage}x exceeds the maximum of {max_lev}x for {historicalpair}."
+                    self.good = False
+
+        if self.good:
+            self.simcandles = sutil.gethistoricledata(self.granularity, historicalpair, self.start, self.stop)
+        else:
+            self.simcandles = []
         self.cancelled = False
         self.simid = sutil.runinsert("INSERT INTO exchangesim (log, granularity, pair, start, stop, scriptid, runat, currenttick, totalticks) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                                      ("", self.granularity, self.pair, start, stop, scriptid, int(time.time()), 0, len(self.simcandles)))
         sutil.setkeyval('simid', self.simid)
         sutil.setkeyval(f'sim_{self.simid}_leverage', str(self.namespace['leverage']))
+
+        # Fetch product details for accurate contract sizing
+        self._base_increment = 0.0001  # fallback
+        self._contract_size = KNOWN_CONTRACT_SIZES.get(historicalpair, 0.01)  # fallback 0.01
+        try:
+            cb = CoinbaseHTTP()
+            product = cb.get_product(historicalpair)
+            inc = float(product.get('base_increment') or 0)
+            if inc > 0:
+                self._base_increment = inc
+            # Prefer hardcoded known value over API (API returns wrong values post-merger)
+            known = KNOWN_CONTRACT_SIZES.get(historicalpair)
+            if known is None:
+                fd = product.get('future_product_details') or {}
+                cs = float(fd.get('contract_size') or 0)
+                if cs > 0:
+                    self._contract_size = cs
+            sutil.setkeyval(f'sim_{self.simid}_contract_size', str(self._contract_size))
+            sutil.setkeyval(f'sim_{self.simid}_base_increment', str(self._base_increment))
+        except Exception:
+            sutil.setkeyval(f'sim_{self.simid}_contract_size', str(self._contract_size))
+
         if(not self.good):
             sutil.runupdate("UPDATE exchangesim SET log=?, status=? WHERE id=?", (error, -1, self.simid))
         sutil.SimID = self.simid
         sutil.TickTime = "init"
-        sutil.simlog(f"Sim started — pair:{self.pair.upper()}-PERP-INTX granularity:{self.granularity} USD:{self.namespace['usd']:.2f} leverage:{self.namespace['leverage']}x")
+        sutil.simlog(
+            f"Sim started — pair:{historicalpair} granularity:{self.granularity} "
+            f"USD:{self.namespace['usd']:.2f} leverage:{self.namespace['leverage']}x "
+            f"contract_size:{self._contract_size} increment:{self._base_increment}"
+        )
 
         self._SimUSDStart = self.namespace['usd']
         self._SimUSDEnd = self.namespace['usd']
@@ -98,6 +140,14 @@ class Simulation:
         self._SimLossTradeCount = 0
         self._SimTradeList = []
 
+
+    def _floor_contracts(self, val: float) -> float:
+        """Floor BTC amount to nearest whole contract, preserving sign."""
+        if val == 0:
+            return 0.0
+        cs = self._contract_size
+        contracts = math.floor(abs(val) / cs)
+        return math.copysign(contracts * cs, val)
 
     def _cancel_order(self, order_id):
         positions = self.namespace['pendingpositions']
@@ -477,7 +527,7 @@ class Simulation:
                                              f"<br>&nbsp;&nbsp;&nbsp;Contracts Closed:{liquid}"+
                                              f"<br>&nbsp;&nbsp;&nbsp;USD Balance:${newusd}"
                                              + self.margin_log_suffix(mark))
-                            crypt = amount / limitprice
+                            crypt = self._floor_contracts(amount / limitprice)
                             newprice, newamount, newusd, fee, notional = self.updatecostbasis(limitprice, crypt, limit_fill_fee)
                             sutil.simlog("Buy Limit filled — entering long"+
                                          f"<br>&nbsp;&nbsp;&nbsp;Id: {positionid}"+
@@ -505,7 +555,7 @@ class Simulation:
                                              f"<br>&nbsp;&nbsp;&nbsp;Contracts Closed:{liquid}"+
                                              f"<br>&nbsp;&nbsp;&nbsp;USD Balance:${newusd}"
                                              + self.margin_log_suffix(mark))
-                            crypt = -(amount / limitprice)
+                            crypt = self._floor_contracts(-(amount / limitprice))
                             newprice, newamount, newusd, fee, notional = self.updatecostbasis(limitprice, crypt, limit_fill_fee)
                             sutil.simlog("Sell Limit filled — entering short"+
                                          f"<br>&nbsp;&nbsp;&nbsp;Id: {positionid}"+
@@ -570,7 +620,7 @@ class Simulation:
                                              f"<br>&nbsp;&nbsp;&nbsp;Contracts Closed:{liquid}"+
                                              f"<br>&nbsp;&nbsp;&nbsp;USD Balance:${newusd}"
                                              + self.margin_log_suffix(mark))
-                            crypt = amount / stopprice
+                            crypt = self._floor_contracts(amount / stopprice)
                             newprice, newamount, newusd, fee, notional = self.updatecostbasis(stopprice, crypt, takerfee)
                             sutil.simlog("Buy Stop filled — entering long"+
                                          f"<br>&nbsp;&nbsp;&nbsp;Id: {positionid}"+
@@ -596,7 +646,7 @@ class Simulation:
                                              f"<br>&nbsp;&nbsp;&nbsp;Contracts Closed:{liquid}"+
                                              f"<br>&nbsp;&nbsp;&nbsp;USD Balance:${newusd}"
                                              + self.margin_log_suffix(mark))
-                            crypt = -(amount / stopprice)
+                            crypt = self._floor_contracts(-(amount / stopprice))
                             newprice, newamount, newusd, fee, notional = self.updatecostbasis(stopprice, crypt, takerfee)
                             sutil.simlog("Sell Stop filled — entering short"+
                                          f"<br>&nbsp;&nbsp;&nbsp;Id: {positionid}"+
@@ -683,9 +733,12 @@ class Simulation:
                     if self.namespace['realposition'] >= 0 and not self.has_margin_to_enter(mark):
                         sutil.simlog("Less than 1% free margin available — cannot add to position")
                         continue
+                    max_notional = self.autosize_notional(mark, maxpos - len(positions))
                     if amount == 0:
-                        amount = self.autosize_notional(mark, maxpos - len(positions))
-                        sutil.simlog("Auto notional (total equity): "+str(amount))
+                        amount = max_notional
+                    else:
+                        amount = min(amount, max_notional)
+                    sutil.simlog("Buy notional: "+str(amount))
                     if amount <= 0:
                         sutil.simlog("Buy skipped — auto-size returned 0 (equity exhausted?)")
                         continue
@@ -726,9 +779,12 @@ class Simulation:
                     if self.namespace['realposition'] <= 0 and not self.has_margin_to_enter(mark):
                         sutil.simlog("Less than 1% free margin available — cannot add to position")
                         continue
+                    max_notional = self.autosize_notional(mark, maxpos - len(positions))
                     if amount == 0:
-                        amount = self.autosize_notional(mark, maxpos - len(positions))
-                        sutil.simlog("Auto notional (total equity): "+str(amount))
+                        amount = max_notional
+                    else:
+                        amount = min(amount, max_notional)
+                    sutil.simlog("Sell notional: "+str(amount))
                     if amount <= 0:
                         sutil.simlog("Sell skipped — auto-size returned 0 (equity exhausted?)")
                         continue
@@ -854,7 +910,7 @@ class Simulation:
                         # Re-size after closing so we use the freed margin too
                         if pos_amount == 0:
                             pos_amount = self.namespace['usd'] * leverage * 0.99
-                        crypt = pos_amount / fill_price
+                        crypt = self._floor_contracts(pos_amount / fill_price)
                         notes = "Buy: entering long"
 
                     elif tradetype_name == util.TradeType.Sell.name:
@@ -876,7 +932,7 @@ class Simulation:
                                             (self.simid, candle['id'], 'fill:Sell:Market:CloseLong', json.dumps(eventdata), cfee, "", candle['timestamp']))
                         if pos_amount == 0:
                             pos_amount = self.namespace['usd'] * leverage * 0.99
-                        crypt = -(pos_amount / fill_price)
+                        crypt = self._floor_contracts(-(pos_amount / fill_price))
                         notes = "Sell: entering short"
 
                     elif tradetype_name == util.TradeType.Exit.name:

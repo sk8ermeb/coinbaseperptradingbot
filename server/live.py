@@ -1,4 +1,5 @@
 import util
+from coinbase_http import CoinbaseHTTP
 import talib
 import numpy
 import traceback
@@ -33,6 +34,7 @@ class LiveTrader:
         self._max_base_size = None
         self._min_base_size = None
         self._base_increment = None
+        self._contract_size = None
 
     # ------------------------------------------------------------------ startup
 
@@ -105,9 +107,10 @@ class LiveTrader:
         lutil.setkeyval('live_granularity', self.granularity)
         self._livelog(f"Pair: {product_id} | Granularity: {self.granularity}")
 
-        self._load_history(product_id)
+        # Read account data first so the UI is populated immediately
         self._load_product_limits(product_id)
         self._read_account_state(product_id)
+        self._load_history(product_id)
         self._livelog("History loaded — waiting for next candle close")
 
         while self.running:
@@ -139,26 +142,19 @@ class LiveTrader:
 
             self._livelog(f"Candle O:{candle['open']} H:{candle['high']} L:{candle['low']} C:{candle['close']}")
 
-            # Update trailing orders (cancel+replace on Coinbase) before reading state
+            # Update trailing orders before reading state
             self._update_trailing_orders(product_id, float(candle['close']))
 
-            # Read account state from Coinbase
             try:
                 self._read_account_state(product_id)
             except Exception:
                 self._livelog(f"Account read error:\n{traceback.format_exc()}")
 
-            # Update namespace arrays
             self._update_namespace_candle(candle)
-
-            # Run indicators
             self._run_indicators(candle)
-
-            # Call tick()
             orders = self._run_tick()
             self._livelog(f"tick() returned {len(orders)} order(s)")
 
-            # Execute orders
             for order in orders:
                 self._execute_order(order, product_id, float(candle['close']))
 
@@ -248,7 +244,6 @@ class LiveTrader:
             if not hasattr(val, '__iter__'):
                 val = [val]
             arr = numpy.array(val, dtype=float)
-            # flatten handles multi-output indicators (e.g. BBANDS returns shape (3, N))
             flat = arr.flatten()
             last = float(flat[-1]) if len(flat) > 0 else numpy.nan
             self._ind_history.setdefault(name, []).append({'time': ts, 'value': last})
@@ -288,15 +283,12 @@ class LiveTrader:
     # ------------------------------------------------------------------ Coinbase account state
 
     def _read_account_state(self, product_id):
-        client = lutil.getclient()
-        if client is None:
-            self._livelog("No Coinbase client — check credentials in Settings")
-            return
+        cb = CoinbaseHTTP()
 
-        # Portfolio summary (buying power / free margin) via CFM futures balance
+        # Balance summary
         try:
-            bal = client.get_futures_balance_summary().to_dict().get('balance_summary', {})
-            self._livelog(f"Futures balance summary raw: {bal}")
+            data = cb.get_balance_summary()
+            bal = data.get('balance_summary', {})
 
             def _amount(key):
                 v = bal.get(key, {})
@@ -305,39 +297,42 @@ class LiveTrader:
             available = _amount('available_margin')
             buying_power = _amount('futures_buying_power')
             self.namespace['usd'] = available if available > 0 else buying_power
-            self._livelog(f"Available margin: ${self.namespace['usd']:.2f} | "
-                          f"Buying power: ${buying_power:.2f} | "
-                          f"Unrealized PnL: ${_amount('unrealized_pnl'):.2f}")
+            self._livelog(
+                f"Available margin: ${self.namespace['usd']:.2f} | "
+                f"Buying power: ${buying_power:.2f} | "
+                f"Unrealized PnL: ${_amount('unrealized_pnl'):.2f}"
+            )
         except Exception:
             self._livelog(f"Futures balance read error:\n{traceback.format_exc()}")
 
-        # Open position via CFM futures position endpoint
+        # Open position
         try:
-            pos_resp = client.get_futures_position(product_id).to_dict()
+            pos_resp = cb.get_position(product_id)
             pos = pos_resp.get('position') or {}
-            contracts = float(pos.get('number_of_contracts', 0) or 0)
-            side = pos.get('side', '')
-            if side == 'SHORT':
-                contracts = -contracts
-            avg_entry = float(pos.get('avg_entry_price', 0) or 0)
-            self.namespace['realposition'] = contracts
-            self.namespace['costbasis'] = avg_entry
-            self._livelog(f"Position: {contracts} contracts @ {avg_entry:.2f} | "
-                          f"Free margin: ${self.namespace['usd']:.2f}")
-        except Exception as e:
-            if 'NoneType' in str(e):
-                # No open position — not an error
+            if not pos or not pos.get('number_of_contracts'):
                 self.namespace['realposition'] = 0.0
                 self.namespace['costbasis'] = 0.0
                 self._livelog(f"No open position | Free margin: ${self.namespace['usd']:.2f}")
             else:
-                self._livelog(f"Position read error:\n{traceback.format_exc()}")
-                self.namespace['realposition'] = 0.0
-                self.namespace['costbasis'] = 0.0
+                contracts = float(pos.get('number_of_contracts', 0) or 0)
+                side = pos.get('side', '')
+                if side == 'SHORT':
+                    contracts = -contracts
+                avg_entry = float(pos.get('avg_entry_price', 0) or 0)
+                self.namespace['realposition'] = contracts
+                self.namespace['costbasis'] = avg_entry
+                self._livelog(
+                    f"Position: {contracts} contracts @ {avg_entry:.2f} | "
+                    f"Free margin: ${self.namespace['usd']:.2f}"
+                )
+        except Exception:
+            self._livelog(f"Position read error:\n{traceback.format_exc()}")
+            self.namespace['realposition'] = 0.0
+            self.namespace['costbasis'] = 0.0
 
-        # Open orders → pendingpositions for script
+        # Open orders → pendingpositions
         try:
-            open_orders = client.list_orders(product_id=product_id, order_status=['OPEN']).to_dict()
+            open_orders = cb.list_orders(product_id=product_id, order_status=['OPEN'])
             orders_list = open_orders.get('orders', [])
 
             # Reconcile liveorder table: mark anything no longer open on Coinbase as filled
@@ -374,9 +369,9 @@ class LiveTrader:
         """For each tracked liveorder with a trail percent, cancel+replace if price moved enough."""
         rows = lutil.runselect(
             "SELECT * FROM liveorder WHERE scriptid=? AND status='open'", (self.scriptid,))
-        client = lutil.getclient()
-        if client is None or not rows:
+        if not rows:
             return
+        cb = CoinbaseHTTP()
 
         for row in rows:
             ltp = row['limittrailpercent']
@@ -460,7 +455,7 @@ class LiveTrader:
                 # Step 1: cancel existing order — abort replacement if cancel fails
                 if row['coinbase_order_id']:
                     try:
-                        client.cancel_orders([row['coinbase_order_id']])
+                        cb.cancel_orders([row['coinbase_order_id']])
                     except Exception:
                         self._livelog(f"Trailing cancel failed for {row['coinbase_order_id']} — skipping replace:\n{traceback.format_exc()}")
                         continue
@@ -471,24 +466,27 @@ class LiveTrader:
                     base_size = str(row['amount'])
                     pos = self.namespace.get('realposition', 0)
                     if new_stop > 0:
-                        # 0.1% buffer on stop-limit so fast moves still fill
                         limit_price_for_stop = round(new_stop * (0.999 if pos > 0 else 1.001), 2)
                         stop_direction = 'STOP_DIRECTION_STOP_DOWN' if pos > 0 else 'STOP_DIRECTION_STOP_UP'
                         side = 'SELL' if pos > 0 else 'BUY'
-                        resp = client.create_order(
-                            client_order_id=new_cb_id, product_id=product_id, side=side,
-                            order_configuration={'stop_limit_stop_limit_gtc': {
+                        resp = cb.create_order(new_cb_id, product_id, side, {
+                            'stop_limit_stop_limit_gtc': {
                                 'base_size': base_size,
                                 'limit_price': str(limit_price_for_stop),
                                 'stop_price': str(round(new_stop, 2)),
                                 'stop_direction': stop_direction,
-                            }})
+                            }
+                        })
                         new_cb_id = self._get_cb_order_id(resp, new_cb_id, product_id) or new_cb_id
                     elif tradetype == 'Buy':
-                        resp = client.limit_order_gtc_buy(new_cb_id, product_id, base_size, str(round(new_limit, 2)))
+                        resp = cb.create_order(new_cb_id, product_id, 'BUY', {
+                            'limit_limit_gtc': {'base_size': base_size, 'limit_price': str(round(new_limit, 2))}
+                        })
                         new_cb_id = self._get_cb_order_id(resp, new_cb_id, product_id) or new_cb_id
                     elif tradetype in ('Sell', 'Exit'):
-                        resp = client.limit_order_gtc_sell(new_cb_id, product_id, base_size, str(round(new_limit, 2)))
+                        resp = cb.create_order(new_cb_id, product_id, 'SELL', {
+                            'limit_limit_gtc': {'base_size': base_size, 'limit_price': str(round(new_limit, 2))}
+                        })
                         new_cb_id = self._get_cb_order_id(resp, new_cb_id, product_id) or new_cb_id
                     lutil.runupdate(
                         "UPDATE liveorder SET coinbase_order_id=?, limitprice=?, stopprice=? WHERE id=?",
@@ -500,32 +498,46 @@ class LiveTrader:
     # ------------------------------------------------------------------ product limits
 
     def _load_product_limits(self, product_id):
-        client = lutil.getclient()
-        if client is None:
-            return
+        from coinbase_http import KNOWN_CONTRACT_SIZES
+        cb = CoinbaseHTTP()
         try:
-            product = client.get_product(product_id).to_dict()
+            product = cb.get_product(product_id)
             self._max_base_size = float(product.get('base_max_size') or 0) or None
             self._min_base_size = float(product.get('base_min_size') or 0) or None
             self._base_increment = float(product.get('base_increment') or 0) or None
+
+            future_details = product.get('future_product_details') or {}
+            api_contract_size = float(future_details.get('contract_size') or 0)
+            perp_details = future_details.get('perpetual_details') or {}
+            max_leverage = float(perp_details.get('max_leverage') or 0)
+
+            known = KNOWN_CONTRACT_SIZES.get(product_id)
+            if known is not None:
+                self._contract_size = known
+                if known != api_contract_size:
+                    self._livelog(
+                        f"contract_size: API returned {api_contract_size}, "
+                        f"using hardcoded {known} for {product_id}"
+                    )
+            else:
+                self._contract_size = api_contract_size if api_contract_size > 0 else None
+
             self._livelog(
                 f"Product limits — min:{self._min_base_size} max:{self._max_base_size} "
-                f"increment:{self._base_increment} (all in BTC for BTC-PERP-INTX)"
+                f"increment:{self._base_increment} | contract_size:{self._contract_size} "
+                f"max_leverage:{max_leverage}x"
             )
         except Exception:
             self._livelog(f"Could not load product limits:\n{traceback.format_exc()}")
 
     def _round_to_increment(self, size: float) -> float:
-        """Round size down to the nearest valid base_increment."""
         inc = getattr(self, '_base_increment', None)
         if not inc or inc <= 0:
             return round(size, 8)
-        # Use integer arithmetic to avoid floating-point drift
         factor = round(1 / inc)
         return math.floor(size * factor) / factor
 
     def _cap_base_size(self, base_size_f):
-        """Round to exchange increment, then clamp to exchange limits. Returns float."""
         base_size_f = self._round_to_increment(base_size_f)
         if self._max_base_size and base_size_f > self._max_base_size:
             self._livelog(f"base_size {base_size_f} capped to max {self._max_base_size}")
@@ -536,17 +548,16 @@ class LiveTrader:
         return base_size_f
 
     def _get_cb_order_id(self, resp, client_order_id, product_id):
-        """Extract Coinbase order_id from response; fall back to open-order lookup."""
-        cb_id = resp.to_dict().get('order_id')
+        """Extract Coinbase order_id from response dict; fall back to open-order lookup."""
+        cb_id = resp.get('success_response', {}).get('order_id') or resp.get('order_id')
         if cb_id:
             return cb_id
         try:
-            client = lutil.getclient()
-            if client:
-                recent = client.list_orders(product_id=product_id, order_status=['OPEN']).to_dict()
-                for o in recent.get('orders', []):
-                    if o.get('client_order_id') == client_order_id:
-                        return o.get('order_id')
+            cb = CoinbaseHTTP()
+            recent = cb.list_orders(product_id=product_id, order_status=['OPEN'])
+            for o in recent.get('orders', []):
+                if o.get('client_order_id') == client_order_id:
+                    return o.get('order_id')
         except Exception:
             pass
         self._livelog(f"Warning: could not resolve Coinbase order_id for client_order_id {client_order_id}")
@@ -555,13 +566,12 @@ class LiveTrader:
     # ------------------------------------------------------------------ cancel order
 
     def _cancel_order(self, order_id):
-        client = lutil.getclient()
-        if client:
-            try:
-                client.cancel_orders([order_id])
-                self._livelog(f"Cancelled order {order_id}")
-            except Exception:
-                self._livelog(f"cancel_order error:\n{traceback.format_exc()}")
+        cb = CoinbaseHTTP()
+        try:
+            cb.cancel_orders([order_id])
+            self._livelog(f"Cancelled order {order_id}")
+        except Exception:
+            self._livelog(f"cancel_order error:\n{traceback.format_exc()}")
         positions = self.namespace.get('pendingpositions', [])
         self.namespace['pendingpositions'] = [p for p in positions if p['id'] != order_id]
         lutil.runupdate(
@@ -571,10 +581,7 @@ class LiveTrader:
     # ------------------------------------------------------------------ order execution
 
     def _execute_order(self, trade_order, product_id, close_price):
-        client = lutil.getclient()
-        if client is None:
-            self._livelog("No client — cannot execute order")
-            return
+        cb = CoinbaseHTTP()
 
         tradetype = trade_order.tradetype
         amount = trade_order.amount
@@ -612,17 +619,17 @@ class LiveTrader:
                 close_qty = self._round_to_increment(close_qty)
                 base_size = str(close_qty)
                 if limitprice > 0:
-                    if pos > 0:
-                        resp = client.limit_order_gtc_sell(order_id, product_id, base_size, str(round(limitprice, 2)))
-                    else:
-                        resp = client.limit_order_gtc_buy(order_id, product_id, base_size, str(round(limitprice, 2)))
+                    side = 'SELL' if pos > 0 else 'BUY'
+                    resp = cb.create_order(order_id, product_id, side, {
+                        'limit_limit_gtc': {'base_size': base_size, 'limit_price': str(round(limitprice, 2))}
+                    })
                     cb_order_id = self._get_cb_order_id(resp, order_id, product_id)
                     self._livelog(f"EXIT limit {'sell' if pos>0 else 'buy'} {base_size} @ {limitprice}")
                 else:
-                    if pos > 0:
-                        resp = client.market_order_sell(order_id, product_id, base_size)
-                    else:
-                        resp = client.market_order_buy(order_id, product_id, base_size)
+                    side = 'SELL' if pos > 0 else 'BUY'
+                    resp = cb.create_order(order_id, product_id, side, {
+                        'market_market_ioc': {'base_size': base_size}
+                    })
                     cb_order_id = self._get_cb_order_id(resp, order_id, product_id)
                     self._livelog(f"EXIT market {'sell' if pos>0 else 'buy'} {base_size}")
 
@@ -630,7 +637,9 @@ class LiveTrader:
                 if realposition < 0:
                     close_id = str(uuid.uuid4())
                     base_size = str(round(abs(realposition), 8))
-                    client.market_order_buy(close_id, product_id, base_size)
+                    cb.create_order(close_id, product_id, 'BUY', {
+                        'market_market_ioc': {'base_size': base_size}
+                    })
                     self._livelog(f"BUY: closed short {base_size} at market")
                     realposition = 0.0
 
@@ -638,28 +647,32 @@ class LiveTrader:
                     bs = self._cap_base_size(round(amount_notional / limitprice, 8))
                     if bs <= 0: return
                     base_size = str(bs)
-                    resp = client.limit_order_gtc_buy(order_id, product_id, base_size, str(round(limitprice, 2)))
+                    resp = cb.create_order(order_id, product_id, 'BUY', {
+                        'limit_limit_gtc': {'base_size': base_size, 'limit_price': str(round(limitprice, 2))}
+                    })
                     cb_order_id = self._get_cb_order_id(resp, order_id, product_id)
                     self._livelog(f"BUY limit {base_size} @ {limitprice}")
                 elif stopprice > 0:
                     bs = self._cap_base_size(round(amount_notional / stopprice, 8))
                     if bs <= 0: return
                     base_size = str(bs)
-                    resp = client.create_order(
-                        client_order_id=order_id, product_id=product_id, side='BUY',
-                        order_configuration={'stop_limit_stop_limit_gtc': {
+                    resp = cb.create_order(order_id, product_id, 'BUY', {
+                        'stop_limit_stop_limit_gtc': {
                             'base_size': base_size,
                             'limit_price': str(round(stopprice * 1.001, 2)),
                             'stop_price': str(round(stopprice, 2)),
-                            'stop_direction': 'STOP_DIRECTION_STOP_UP'
-                        }})
+                            'stop_direction': 'STOP_DIRECTION_STOP_UP',
+                        }
+                    })
                     cb_order_id = self._get_cb_order_id(resp, order_id, product_id)
                     self._livelog(f"BUY stop {base_size} @ {stopprice}")
                 else:
                     bs = self._cap_base_size(round(amount_notional / close_price, 8))
                     if bs <= 0: return
                     base_size = str(bs)
-                    resp = client.market_order_buy(order_id, product_id, base_size)
+                    resp = cb.create_order(order_id, product_id, 'BUY', {
+                        'market_market_ioc': {'base_size': base_size}
+                    })
                     cb_order_id = self._get_cb_order_id(resp, order_id, product_id)
                     self._livelog(f"BUY market {base_size} contracts")
 
@@ -667,7 +680,9 @@ class LiveTrader:
                 if realposition > 0:
                     close_id = str(uuid.uuid4())
                     base_size = str(round(realposition, 8))
-                    client.market_order_sell(close_id, product_id, base_size)
+                    cb.create_order(close_id, product_id, 'SELL', {
+                        'market_market_ioc': {'base_size': base_size}
+                    })
                     self._livelog(f"SELL: closed long {base_size} at market")
                     realposition = 0.0
 
@@ -675,28 +690,32 @@ class LiveTrader:
                     bs = self._cap_base_size(round(amount_notional / limitprice, 8))
                     if bs <= 0: return
                     base_size = str(bs)
-                    resp = client.limit_order_gtc_sell(order_id, product_id, base_size, str(round(limitprice, 2)))
+                    resp = cb.create_order(order_id, product_id, 'SELL', {
+                        'limit_limit_gtc': {'base_size': base_size, 'limit_price': str(round(limitprice, 2))}
+                    })
                     cb_order_id = self._get_cb_order_id(resp, order_id, product_id)
                     self._livelog(f"SELL limit {base_size} @ {limitprice}")
                 elif stopprice > 0:
                     bs = self._cap_base_size(round(amount_notional / stopprice, 8))
                     if bs <= 0: return
                     base_size = str(bs)
-                    resp = client.create_order(
-                        client_order_id=order_id, product_id=product_id, side='SELL',
-                        order_configuration={'stop_limit_stop_limit_gtc': {
+                    resp = cb.create_order(order_id, product_id, 'SELL', {
+                        'stop_limit_stop_limit_gtc': {
                             'base_size': base_size,
                             'limit_price': str(round(stopprice * 0.999, 2)),
                             'stop_price': str(round(stopprice, 2)),
-                            'stop_direction': 'STOP_DIRECTION_STOP_DOWN'
-                        }})
+                            'stop_direction': 'STOP_DIRECTION_STOP_DOWN',
+                        }
+                    })
                     cb_order_id = self._get_cb_order_id(resp, order_id, product_id)
                     self._livelog(f"SELL stop {base_size} @ {stopprice}")
                 else:
                     bs = self._cap_base_size(round(amount_notional / close_price, 8))
                     if bs <= 0: return
                     base_size = str(bs)
-                    resp = client.market_order_sell(order_id, product_id, base_size)
+                    resp = cb.create_order(order_id, product_id, 'SELL', {
+                        'market_market_ioc': {'base_size': base_size}
+                    })
                     cb_order_id = self._get_cb_order_id(resp, order_id, product_id)
                     self._livelog(f"SELL market {base_size} contracts")
 
@@ -725,19 +744,17 @@ class LiveTrader:
     # ------------------------------------------------------------------ candle fetch
 
     def _fetch_closed_candle(self, product_id, close_time, gran_secs):
-        client = lutil.getclient()
+        cb = CoinbaseHTTP()
         candle_open_ts = int(close_time) - gran_secs
         start = candle_open_ts - gran_secs
         end = int(close_time) + gran_secs
 
-        resp = client.get_candles(product_id, start=str(start), end=str(end),
-                                  granularity=self.granularity)
-        candles = resp.to_dict().get('candles', [])
+        resp = cb.get_candles(product_id, start=str(start), end=str(end), granularity=self.granularity)
+        candles = resp.get('candles', [])
         best = min(candles, key=lambda c: abs(int(c.get('start', 0)) - candle_open_ts), default=None)
         if best is None or abs(int(best.get('start', 0)) - candle_open_ts) > gran_secs:
             return None
 
-        # Persist to candle table
         try:
             cid = lutil.runinsert(
                 "INSERT INTO candle (pair, open, close, high, low, volume, timestamp, duration) "
@@ -778,6 +795,8 @@ class LiveTrader:
             'unrealized_pnl': round(upnl, 2),
             'total_equity': round(usd + locked + upnl, 2),
             'leverage': lev,
+            'contract_size': self._contract_size,
+            'base_increment': self._base_increment,
             'log': (lutil.getkeyval('live_log') or '').split('\n')[-100:],
         }
 
@@ -798,6 +817,7 @@ def start_trader(scriptid: int) -> LiveTrader:
         if _trader and _trader.running:
             _trader.stop()
             time.sleep(1)
+        lutil.setkeyval('live_log', '')
         _trader = LiveTrader(scriptid)
         _trader.start()
         return _trader

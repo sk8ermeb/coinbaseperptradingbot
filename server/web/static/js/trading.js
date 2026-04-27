@@ -10,6 +10,22 @@ let pricePollTimer = null;
 let isRunning = false;
 let granularityLocked = false;
 let currentPair = 'btc';
+let _stopping = false;
+
+const PRODUCT_SPECS = {
+  btc:  { label: 'BTC',  maxLev: 3.3,  contractSize: 0.01 },
+  eth:  { label: 'ETH',  maxLev: 3.0,  contractSize: 0.1 },
+  sol:  { label: 'SOL',  maxLev: 1.8,  contractSize: 5.0 },
+  xrp:  { label: 'XRP',  maxLev: 1.8,  contractSize: 500.0 },
+  doge: { label: 'DOGE', maxLev: 1.1,  contractSize: 5000.0 },
+  ada:  { label: 'ADA',  maxLev: 2.4,  contractSize: 1000.0 },
+  paxg: { label: 'PAXG', maxLev: 12.1, contractSize: 1.0 },
+  zec:  { label: 'ZEC',  maxLev: 2.0,  contractSize: 1.0 },
+  xlm:  { label: 'XLM',  maxLev: 2.6,  contractSize: 5000.0 },
+  link: { label: 'LINK', maxLev: 2.3,  contractSize: 50.0 },
+  sui:  { label: 'SUI',  maxLev: 1.8,  contractSize: 500.0 },
+  aave: { label: 'AAVE', maxLev: 1.5,  contractSize: 5.0 },
+};
 
 // ------------------------------------------------------------------ chart init
 
@@ -40,7 +56,25 @@ chart.subscribeCrosshairMove(param => {
   }
 });
 
-// ------------------------------------------------------------------ script dropdown
+// ------------------------------------------------------------------ script / product / granularity dropdowns
+
+function syncProductDropdown(pair) {
+  const pdrop = document.getElementById('productDropdown');
+  for (const opt of pdrop.options) {
+    if (opt.value === (pair || '').toLowerCase()) { opt.selected = true; return; }
+  }
+}
+
+function updateProductPanel() {
+  if (isRunning) return;
+  const specs = PRODUCT_SPECS[currentPair];
+  if (!specs) return;
+  document.getElementById('acc_pair').textContent = specs.label + '-PERP-INTX';
+  document.getElementById('acc_lev').textContent  = specs.maxLev + 'x';
+  document.getElementById('acc_contract_size').textContent = specs.contractSize + ' ' + specs.label;
+  document.getElementById('acc_gran').textContent =
+    document.getElementById('granularityDropdown').value || '—';
+}
 
 async function onScriptChange() {
   if (granularityLocked) return;
@@ -52,17 +86,29 @@ async function onScriptChange() {
     if (resp.ok) {
       const data = await resp.json();
       currentPair = data.pair || 'btc';
+      syncProductDropdown(currentPair);
       const drop = document.getElementById('granularityDropdown');
       for (const opt of drop.options) {
         if (opt.value === data.granularity) { opt.selected = true; break; }
       }
+      updateProductPanel();
       loadCandles();
     }
   } catch(e) {}
 }
 
+function onProductChange() {
+  if (isRunning) return;
+  currentPair = document.getElementById('productDropdown').value;
+  updateProductPanel();
+  loadCandles();
+}
+
 function onGranularityChange() {
-  if (!isRunning) loadCandles();
+  if (isRunning) return;
+  document.getElementById('acc_gran').textContent =
+    document.getElementById('granularityDropdown').value || '—';
+  loadCandles();
 }
 
 // ------------------------------------------------------------------ start / stop
@@ -77,6 +123,7 @@ async function startTrading() {
     body: JSON.stringify({ scriptid: parseInt(scriptid) }),
   });
   if (resp.ok) {
+    _stopping = false;
     setRunningUI(true);
     loadCandles();
     startPolling();
@@ -87,9 +134,14 @@ async function startTrading() {
 }
 
 async function stopTrading() {
-  await fetch('/api/live/stop', { method: 'POST' });
+  _stopping = true;
   setRunningUI(false);
   stopPolling();
+  try {
+    await fetch('/api/live/stop', { method: 'POST' });
+  } finally {
+    _stopping = false;
+  }
 }
 
 function setRunningUI(running) {
@@ -98,6 +150,7 @@ function setRunningUI(running) {
   document.getElementById('bstart').classList.toggle('d-none', running);
   document.getElementById('bstop').classList.toggle('d-none', !running);
   document.getElementById('scriptDropdown').disabled = running;
+  document.getElementById('productDropdown').disabled = running;
   document.getElementById('granularityDropdown').disabled = running;
   const badge = document.getElementById('statusbadge');
   badge.textContent = running ? 'Running' : 'Stopped';
@@ -106,12 +159,25 @@ function setRunningUI(running) {
 
 // ------------------------------------------------------------------ polling
 
+let _fastPollCount = 0;
+
 function startPolling() {
   if (pollTimer) clearInterval(pollTimer);
-  pollStatus();
-  pollTimer = setInterval(pollStatus, 15000);
-
   if (pricePollTimer) clearInterval(pricePollTimer);
+
+  // Poll every 3s for the first 30s so account data appears as soon as the
+  // backend finishes reading balance/position (before history load completes).
+  _fastPollCount = 0;
+  pollStatus();
+  pollTimer = setInterval(() => {
+    pollStatus();
+    _fastPollCount++;
+    if (_fastPollCount >= 10) {
+      clearInterval(pollTimer);
+      pollTimer = setInterval(pollStatus, 15000);
+    }
+  }, 3000);
+
   pricePollTimer = setInterval(pollPrice, 5000);
 }
 
@@ -126,7 +192,7 @@ async function pollStatus() {
     if (!resp.ok) return;
     const data = await resp.json();
     updateAccountPanel(data);
-    if (data.running !== isRunning) {
+    if (data.running !== isRunning && !(data.running && _stopping)) {
       setRunningUI(data.running);
     }
     document.getElementById('lastupdate').textContent =
@@ -169,7 +235,10 @@ function updateAccountPanel(data) {
   pnlEl.textContent = (data.unrealized_pnl >= 0 ? '+' : '') + '$' + fmt(data.unrealized_pnl);
   pnlEl.style.color = data.unrealized_pnl >= 0 ? '#26a69a' : '#ef5350';
   document.getElementById('acc_lev').textContent  = data.leverage + 'x';
-  document.getElementById('acc_pair').textContent = (data.pair || '').toUpperCase() + '-PERP-INTX';
+  const pairBase = (data.pair || '').toUpperCase();
+  document.getElementById('acc_contract_size').textContent =
+    data.contract_size ? data.contract_size + ' ' + pairBase : '—';
+  document.getElementById('acc_pair').textContent = pairBase + '-PERP-INTX';
   document.getElementById('acc_gran').textContent = data.granularity || '—';
 
   if (data.log && data.log.length) {
@@ -343,6 +412,7 @@ function renderEvents(events) {
             if (parseInt(opt.value) === data.scriptid) { opt.selected = true; break; }
           }
         }
+        if (data.pair) syncProductDropdown(data.pair);
         if (data.granularity) {
           const gdrop = document.getElementById('granularityDropdown');
           for (const opt of gdrop.options) {
@@ -352,6 +422,21 @@ function renderEvents(events) {
       }
     }
   } catch(e) {}
+
+  if (!isRunning) {
+    updateProductPanel();
+    try {
+      const balResp = await fetch('/api/live/balance');
+      if (balResp.ok) {
+        const bal = await balResp.json();
+        document.getElementById('acc_usd').textContent    = '$' + fmt(bal.usd);
+        document.getElementById('acc_equity').textContent = '$' + fmt(bal.total_equity);
+        const pnlEl = document.getElementById('acc_upnl');
+        pnlEl.textContent = (bal.unrealized_pnl >= 0 ? '+' : '') + '$' + fmt(bal.unrealized_pnl);
+        pnlEl.style.color = bal.unrealized_pnl >= 0 ? '#26a69a' : '#ef5350';
+      }
+    } catch(e) {}
+  }
 
   // Fetch pair/granularity from selected script, then load chart
   await onScriptChange();

@@ -1,7 +1,6 @@
 import os
 import sqlite3
 from threading import Lock
-from coinbase.rest import RESTClient
 from enum import Enum
 import json
 #this class is singleton so anywhere the code needs config data or to do database read/writes
@@ -92,7 +91,6 @@ class util:
     _conn = None
     _sqlfile = None
     lock = Lock()
-    client = None
     granularities = {'ONE_MINUTE':60, 'FIVE_MINUTE':300, 'FIFTEEN_MINUTE':900, 'ONE_HOUR':3600, 'SIX_HOUR':21600, 'ONE_DAY':86400}
     SimID = None
     TickTime = None
@@ -368,19 +366,6 @@ class util:
         return True
 
 
-    def getclient(self):
-        if(self.client is None):
-            key = None
-            secret = None
-            res = self.runselect("SELECT * FROM metadata WHERE metakey=?", ('cbkey',))
-            if(len(res)> 0):
-                key = res[0]['metavalue']
-            res = self.runselect("SELECT * FROM metadata WHERE metakey=?", ('cbsecret',))
-            if(len(res)> 0):
-                secret = res[0]['metavalue']
-            if key is not None and secret is not None:
-                self.client = RESTClient(api_key=key, api_secret=secret)
-        return self.client
 
     def getconfig(self, key: str) -> str:
         if self.configs is None:
@@ -442,64 +427,58 @@ class util:
         return(certfile, keyfile)
 
     def gethistoricledata(self, granularity:str, pair:str, start:int, stop:int):
-        timebase = 0
+        # Lazy import to avoid circular dependency (coinbase_http imports util)
+        from coinbase_http import CoinbaseHTTP
         product_id = pair
-        client = self.getclient()
-        if client is None:
-            return []
+        cb = CoinbaseHTTP()
+
         candles = self.runselect("SELECT * FROM candle WHERE duration=? and pair=? ORDER BY timestamp LIMIT 1", (granularity, pair))
-        if(len(candles)> 0):
+        if len(candles) > 0:
             timebase = candles[0]['timestamp']
         else:
             timebase = stop
 
         if start < timebase:
             tstart = start
-            while tstart<timebase:
-                pagediff = tstart + self.granularities[granularity]*250
-                if(pagediff > timebase):
+            while tstart < timebase:
+                pagediff = tstart + self.granularities[granularity] * 250
+                if pagediff > timebase:
                     pagediff = timebase
-
-                response = client.get_candles(
-                    product_id,
-                    start=str(tstart),
-                    end=str(pagediff),
-                    granularity=granularity
-                )
-                candles = response.to_dict()
-                candles = candles['candles']
-                for candle in candles:
-                    try:
-                        self.runinsert("INSERT INTO candle (pair, open, close, high, low, volume, timestamp, duration) VALUES(?,?,?,?,?,?,?,?)",
-                                        (pair, candle['open'], candle['close'], candle['high'], candle['low'], candle['volume'], candle['start'], granularity))
-                    except sqlite3.IntegrityError as e:
-                        pass
+                try:
+                    response = cb.get_candles(product_id, str(tstart), str(pagediff), granularity)
+                    for candle in response.get('candles', []):
+                        try:
+                            self.runinsert(
+                                "INSERT INTO candle (pair, open, close, high, low, volume, timestamp, duration) VALUES(?,?,?,?,?,?,?,?)",
+                                (pair, candle['open'], candle['close'], candle['high'], candle['low'], candle['volume'], candle['start'], granularity))
+                        except sqlite3.IntegrityError:
+                            pass
+                except Exception as e:
+                    print(f"gethistoricledata fetch error: {e}")
                 tstart = pagediff
 
         candles = self.runselect("SELECT * FROM candle WHERE duration=? and pair=? ORDER BY timestamp DESC LIMIT 1", (granularity, pair))
+        if not candles:
+            return []
         timebase = stop
         tstart = candles[0]['timestamp']
         if tstart < timebase:
-            while tstart<timebase:
-                pagediff = tstart + self.granularities[granularity]*250
-                if(pagediff > timebase):
+            while tstart < timebase:
+                pagediff = tstart + self.granularities[granularity] * 250
+                if pagediff > timebase:
                     pagediff = timebase
-
-                response = client.get_candles(
-                    product_id,
-                    start=str(tstart),
-                    end=str(pagediff),
-                    granularity=granularity
-                )
+                try:
+                    response = cb.get_candles(product_id, str(tstart), str(pagediff), granularity)
+                    for candle in response.get('candles', []):
+                        try:
+                            self.runinsert(
+                                "INSERT INTO candle (pair, open, close, high, low, volume, timestamp, duration) VALUES(?,?,?,?,?,?,?,?)",
+                                (pair, candle['open'], candle['close'], candle['high'], candle['low'], candle['volume'], candle['start'], granularity))
+                        except sqlite3.IntegrityError:
+                            pass
+                except Exception as e:
+                    print(f"gethistoricledata fetch error: {e}")
                 tstart = pagediff
-                candles = response.to_dict()
-                candles = candles['candles']
-                for candle in candles:
-                    try:
-                        self.runinsert("INSERT INTO candle (pair, open, close, high, low, volume, timestamp, duration) VALUES(?,?,?,?,?,?,?,?)",
-                                        (pair, candle['open'], candle['close'], candle['high'], candle['low'], candle['volume'], candle['start'], granularity))
-                    except sqlite3.IntegrityError as e:
-                        pass
 
         candles = self.runselect("SELECT * FROM candle WHERE timestamp>=? AND timestamp<=? AND duration=? and pair=? ORDER BY timestamp", (start, stop, granularity, pair))
         return candles
