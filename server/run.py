@@ -9,10 +9,12 @@ from fastapi import Request, Response
 from fastapi.templating import Jinja2Templates
 from util import util
 import live as live_module
+import ntfy_util
 from contextlib import asynccontextmanager
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    ntfy_util.ensure_uuid()
     live_module.maybe_autoresume()
     yield
     live_module.stop_trader()

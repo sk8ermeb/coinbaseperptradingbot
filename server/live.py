@@ -69,6 +69,11 @@ class LiveTrader:
             )
         except Exception:
             pass
+        try:
+            import ntfy_util
+            ntfy_util.send_notification(event_type, data)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------ main loop
 
@@ -159,6 +164,12 @@ class LiveTrader:
             self._livelog(f"tick() returned {len(orders)} order(s)")
 
             for order in orders:
+                self._log_event('user:' + order.tradetype.name, {
+                    'tradetype': order.tradetype.name,
+                    'amount': order.amount,
+                    'limitprice': order.limitprice,
+                    'stopprice': order.stopprice,
+                })
                 self._execute_order(order, product_id, float(candle['close']))
 
             self._log_event('tick', {
@@ -348,6 +359,13 @@ class LiveTrader:
                     lutil.runupdate(
                         "UPDATE liveorder SET status='filled' WHERE id=?", (row['id'],))
                     self._livelog(f"Order {row['coinbase_order_id']} marked filled")
+                    self._log_event('fill:' + (row.get('tradetype') or 'order'), {
+                        'coinbase_order_id': row.get('coinbase_order_id'),
+                        'tradetype': row.get('tradetype'),
+                        'amount': row.get('amount', 0),
+                        'limitprice': row.get('limitprice', 0),
+                        'stopprice': row.get('stopprice', 0),
+                    })
 
             pending = []
             for o in orders_list:
@@ -570,6 +588,10 @@ class LiveTrader:
 
     def _cancel_order(self, order_id):
         cb = CoinbaseHTTP()
+        row = lutil.runselect(
+            "SELECT tradetype FROM liveorder WHERE coinbase_order_id=? AND scriptid=?",
+            (order_id, self.scriptid))
+        tradetype_name = row[0]['tradetype'] if row else 'order'
         try:
             cb.cancel_orders([order_id])
             self._livelog(f"Cancelled order {order_id}")
@@ -580,6 +602,7 @@ class LiveTrader:
         lutil.runupdate(
             "UPDATE liveorder SET status='cancelled' WHERE coinbase_order_id=? AND scriptid=?",
             (order_id, self.scriptid))
+        self._log_event('cancel:' + tradetype_name, {'coinbase_order_id': order_id})
 
     # ------------------------------------------------------------------ order execution
 
@@ -735,7 +758,7 @@ class LiveTrader:
                      limitprice, stopprice, base_size_f, ltp, stp, 'open', int(time.time()),
                      0, 0.0, float(stopprice)))
 
-            self._log_event('order', {
+            self._log_event('create:' + tradetype.name, {
                 'tradetype': tradetype.name, 'amount': amount,
                 'limitprice': limitprice, 'stopprice': stopprice,
                 'coinbase_order_id': cb_order_id,

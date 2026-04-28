@@ -390,6 +390,29 @@ async def live_history(session: str = Depends(require_session)):
     return JSONResponse({'events': events, 'orders': orders})
 
 
+@router.get("/settings/ntfy")
+async def settings_ntfy_get(session: str = Depends(require_session)):
+    import ntfy_util
+    return JSONResponse({'uuid': ntfy_util.get_uuid(), **ntfy_util.get_prefs()})
+
+
+@router.post("/settings/ntfy/prefs")
+async def settings_ntfy_prefs(session: str = Depends(require_session),
+                               payload: dict = Body(...)):
+    import ntfy_util
+    ntfy_util.set_prefs(payload)
+    return JSONResponse({'status': 'ok'})
+
+
+@router.post("/ntfy/test")
+async def ntfy_test(session: str = Depends(require_session)):
+    import ntfy_util
+    ok, msg = ntfy_util.send_test()
+    if not ok:
+        raise HTTPException(status_code=400, detail=msg)
+    return JSONResponse({'status': 'sent'})
+
+
 @router.get("/live/scriptgranularity")
 async def live_script_granularity(session: str = Depends(require_session),
                                   scriptid: int = Query(...)):
