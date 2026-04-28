@@ -284,12 +284,16 @@ function setChartIndicators(indicators) {
   document.getElementById('indicator-legend').innerHTML = '';
 
   const lastClose = candleslist.length > 0 ? candleslist[candleslist.length - 1].close : 0;
+  const chartTimes = new Set(candleslist.map(c => c.timestamp));
   let subPane = null;
   let j = 0;
 
   for (const name in indicators) {
     const color = colors[j % colors.length];
-    const data = (indicators[name] || []).filter(e => e.value !== null && !isNaN(e.value));
+    const data = (indicators[name] || []).filter(e =>
+      e.time != null && chartTimes.has(e.time) &&
+      e.value !== null && e.value !== undefined && !isNaN(e.value)
+    );
 
     let targetPaneIndex = undefined;
     if (lastClose > 0 && data.length > 0) {
