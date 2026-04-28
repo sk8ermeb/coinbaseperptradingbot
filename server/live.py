@@ -80,7 +80,10 @@ class LiveTrader:
                 self._livelog(f"CRASH:\n{traceback.format_exc()}")
                 if self.running:
                     self._livelog("Auto-restarting in 60 seconds...")
-                    time.sleep(60)
+                    for _ in range(60):
+                        if not self.running:
+                            break
+                        time.sleep(1)
 
     def _run_loop(self):
         self._livelog(f"Starting — script {self.scriptid}")

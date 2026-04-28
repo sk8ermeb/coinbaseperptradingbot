@@ -15,6 +15,7 @@ from contextlib import asynccontextmanager
 async def lifespan(app: FastAPI):
     live_module.maybe_autoresume()
     yield
+    live_module.stop_trader()
 
 app = FastAPI(lifespan=lifespan)
 
@@ -167,7 +168,8 @@ if __name__ == "__main__":
     if(tls.lower() == 'true'):
         print("Running with TLS enabled")
         cert, key = myutil.getservercert()
-        uvicorn.run(app, host=serverip, port=int(serverport), ssl_keyfile=key, ssl_certfile=cert)
+        uvicorn.run(app, host=serverip, port=int(serverport), ssl_keyfile=key, ssl_certfile=cert,
+                    timeout_graceful_shutdown=5)
     else:
         print("Running without TLS enabled")
-        uvicorn.run(app, host=serverip, port=int(serverport))
+        uvicorn.run(app, host=serverip, port=int(serverport), timeout_graceful_shutdown=5)
