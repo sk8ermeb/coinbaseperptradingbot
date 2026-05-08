@@ -823,6 +823,7 @@ class LiveTrader:
             'leverage': lev,
             'contract_size': self._contract_size,
             'base_increment': self._base_increment,
+            'last_tick_time': int(self.namespace.get('time', 0)),
             'log': (lutil.getkeyval('live_log') or '').split('\n')[-100:],
         }
 

@@ -124,6 +124,7 @@ async function startTrading() {
   });
   if (resp.ok) {
     _stopping = false;
+    lastTickTime = null;
     setRunningUI(true);
     loadCandles();
     startPolling();
@@ -198,6 +199,10 @@ async function pollStatus() {
     document.getElementById('lastupdate').textContent =
       'Updated ' + new Date().toLocaleTimeString();
 
+    if (data.running && data.last_tick_time && data.last_tick_time !== lastTickTime) {
+      lastTickTime = data.last_tick_time;
+      loadCandles(false);
+    }
   } catch(e) {}
 }
 
@@ -249,7 +254,9 @@ function updateAccountPanel(data) {
 
 // ------------------------------------------------------------------ chart
 
-async function loadCandles() {
+let lastTickTime = null;
+
+async function loadCandles(fitView = true) {
   try {
     const gran = document.getElementById('granularityDropdown').value;
     const params = isRunning ? '' : `?pair=${encodeURIComponent(currentPair)}&granularity=${encodeURIComponent(gran)}`;
@@ -258,7 +265,7 @@ async function loadCandles() {
     const data = await resp.json();
     setChartCandles(data.candles || []);
     setChartIndicators(data.indicators || {});
-    chart.timeScale().fitContent();
+    if (fitView) chart.timeScale().fitContent();
   } catch(e) {}
 }
 
