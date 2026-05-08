@@ -198,7 +198,6 @@ async function pollStatus() {
     document.getElementById('lastupdate').textContent =
       'Updated ' + new Date().toLocaleTimeString();
 
-    if (data.running) loadCandles();
   } catch(e) {}
 }
 
@@ -349,15 +348,18 @@ function toggleIndicator(name, checkbox) {
 
 // ------------------------------------------------------------------ history tab
 
-document.querySelector('[data-bs-target="#historytab"]').addEventListener('shown.bs.tab', loadHistory);
+let historyPage = 0;
 
-async function loadHistory() {
+document.querySelector('[data-bs-target="#historytab"]').addEventListener('shown.bs.tab', () => loadHistory(0));
+
+async function loadHistory(page = 0) {
+  historyPage = page;
   try {
-    const resp = await fetch('/api/live/history');
+    const resp = await fetch(`/api/live/history?page=${page}`);
     if (!resp.ok) return;
     const data = await resp.json();
     renderOrders(data.orders || []);
-    renderEvents(data.events || []);
+    renderEvents(data.events || [], page);
   } catch(e) {}
 }
 
@@ -373,7 +375,7 @@ function renderOrders(orders) {
   }
 }
 
-function renderEvents(events) {
+function renderEvents(events, page) {
   const tbody = document.getElementById('eventbody');
   tbody.innerHTML = '';
   for (const e of events) {
@@ -382,10 +384,32 @@ function renderEvents(events) {
     let details = '';
     try {
       const d = JSON.parse(e.eventdata || '{}');
-      details = Object.entries(d).map(([k,v]) => `${k}:${typeof v==='number'?v.toFixed(4):v}`).join(' | ');
+      details = Object.entries(d)
+        .filter(([k]) => k !== 'time')
+        .map(([k,v]) => `${k}:${typeof v==='number'?v.toFixed(4):v}`)
+        .join(' | ');
     } catch(_) {}
     tr.innerHTML = `<td>${dt}</td><td>${e.eventtype}</td><td class="small text-muted">${details}</td>`;
     tbody.appendChild(tr);
+  }
+
+  const paginationEl = document.getElementById('eventpagination');
+  paginationEl.innerHTML = '';
+  if (page > 0 || events.length === 300) {
+    if (events.length === 300) {
+      const btn = document.createElement('button');
+      btn.className = 'btn btn-sm btn-outline-secondary me-2';
+      btn.textContent = '← Older';
+      btn.onclick = () => loadHistory(page + 1);
+      paginationEl.appendChild(btn);
+    }
+    if (page > 0) {
+      const btn = document.createElement('button');
+      btn.className = 'btn btn-sm btn-outline-secondary';
+      btn.textContent = 'Newer →';
+      btn.onclick = () => loadHistory(page - 1);
+      paginationEl.appendChild(btn);
+    }
   }
 }
 

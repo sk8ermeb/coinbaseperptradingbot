@@ -377,17 +377,18 @@ async def live_price(session: str = Depends(require_session)):
 
 
 @router.get("/live/history")
-async def live_history(session: str = Depends(require_session)):
+async def live_history(session: str = Depends(require_session), page: int = Query(0)):
     scriptid = autil.getkeyval('live_scriptid')
     if not scriptid:
-        return JSONResponse({'events': []})
+        return JSONResponse({'events': [], 'orders': [], 'page': page})
+    offset = page * 300
     events = autil.runselect(
-        "SELECT * FROM liveevent WHERE scriptid=? ORDER BY time DESC LIMIT 200",
-        (int(scriptid),))
+        "SELECT * FROM liveevent WHERE scriptid=? ORDER BY time DESC LIMIT 300 OFFSET ?",
+        (int(scriptid), offset))
     orders = autil.runselect(
         "SELECT * FROM liveorder WHERE scriptid=? ORDER BY time DESC LIMIT 100",
         (int(scriptid),))
-    return JSONResponse({'events': events, 'orders': orders})
+    return JSONResponse({'events': events, 'orders': orders, 'page': page})
 
 
 @router.get("/settings/ntfy")
