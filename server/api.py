@@ -432,9 +432,12 @@ async def live_tick_detail(session: str = Depends(require_session),
         "SELECT * FROM liveevent WHERE scriptid=? AND id >= ? AND id <= ? ORDER BY id ASC",
         (int(scriptid), start_id, tick_id))
 
-    # Filter live_log lines within the tick's time window
+    # Filter live_log lines within the tick's time window.
+    # Continuation lines (no timestamp, e.g. traceback lines) are included
+    # if they follow a line that was already accepted.
     live_log = autil.getkeyval('live_log') or ''
     simlog_lines = []
+    in_window = False
     for line in live_log.split('\n'):
         if not line.strip():
             continue
@@ -443,10 +446,11 @@ async def live_tick_detail(session: str = Depends(require_session),
             try:
                 dt = datetime.strptime(m.group(1), '%Y-%m-%d %H:%M:%S')
                 ts = _calendar.timegm(dt.timetuple())
-                if prev_time <= ts <= tick_time + 10:
-                    simlog_lines.append(line)
+                in_window = prev_time <= ts <= tick_time + 10
             except Exception:
-                pass
+                in_window = False
+        if in_window:
+            simlog_lines.append(line)
 
     return JSONResponse({'events': events, 'simlog': simlog_lines})
 
