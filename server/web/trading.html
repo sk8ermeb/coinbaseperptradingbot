@@ -140,6 +140,26 @@
 
 </div>
 
+<!-- Tick Detail Modal -->
+<div class="modal fade" id="tickDetailModal" tabindex="-1" aria-labelledby="tickDetailModalLabel" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header py-2">
+        <h6 class="modal-title mb-0" id="tickDetailModalLabel">Tick Detail</h6>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body p-3">
+        <div id="tickDetailContent">
+          <div class="text-center py-4"><div class="spinner-border spinner-border-sm" role="status"></div> Loading…</div>
+        </div>
+      </div>
+      <div class="modal-footer py-2">
+        <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script src="/static/js/lightweight-charts.standalone.production.js"></script>
 <script src="/static/js/trading.js"></script>
 {% endblock %}

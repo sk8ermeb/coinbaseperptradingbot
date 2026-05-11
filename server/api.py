@@ -391,6 +391,66 @@ async def live_history(session: str = Depends(require_session), page: int = Quer
     return JSONResponse({'events': events, 'orders': orders, 'page': page})
 
 
+@router.get("/live/tick_detail")
+async def live_tick_detail(session: str = Depends(require_session),
+                           event_id: int = Query(...)):
+    import re
+    from datetime import datetime
+    import calendar as _calendar
+
+    scriptid = autil.getkeyval('live_scriptid')
+    if not scriptid:
+        return JSONResponse({'events': [], 'simlog': []})
+
+    clicked = autil.runselect("SELECT * FROM liveevent WHERE id=?", (event_id,))
+    if not clicked:
+        raise HTTPException(status_code=404, detail="Event not found")
+
+    # Find the tick event at or after the clicked id (tick events close the batch)
+    tick_row = autil.runselect(
+        "SELECT * FROM liveevent WHERE scriptid=? AND eventtype='tick' AND id >= ? ORDER BY id ASC LIMIT 1",
+        (int(scriptid), event_id))
+    if not tick_row:
+        tick_row = autil.runselect(
+            "SELECT * FROM liveevent WHERE scriptid=? AND eventtype='tick' AND id <= ? ORDER BY id DESC LIMIT 1",
+            (int(scriptid), event_id))
+    if not tick_row:
+        return JSONResponse({'events': clicked, 'simlog': []})
+
+    tick_event = tick_row[0]
+    tick_id = tick_event['id']
+    tick_time = tick_event['time']
+
+    # Find the previous tick event to bound the window
+    prev_tick = autil.runselect(
+        "SELECT * FROM liveevent WHERE scriptid=? AND eventtype='tick' AND id < ? ORDER BY id DESC LIMIT 1",
+        (int(scriptid), tick_id))
+    start_id = (prev_tick[0]['id'] + 1) if prev_tick else 0
+    prev_time = prev_tick[0]['time'] if prev_tick else (tick_time - 3600)
+
+    events = autil.runselect(
+        "SELECT * FROM liveevent WHERE scriptid=? AND id >= ? AND id <= ? ORDER BY id ASC",
+        (int(scriptid), start_id, tick_id))
+
+    # Filter live_log lines within the tick's time window
+    live_log = autil.getkeyval('live_log') or ''
+    simlog_lines = []
+    for line in live_log.split('\n'):
+        if not line.strip():
+            continue
+        m = re.match(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) UTC', line)
+        if m:
+            try:
+                dt = datetime.strptime(m.group(1), '%Y-%m-%d %H:%M:%S')
+                ts = _calendar.timegm(dt.timetuple())
+                if prev_time <= ts <= tick_time + 10:
+                    simlog_lines.append(line)
+            except Exception:
+                pass
+
+    return JSONResponse({'events': events, 'simlog': simlog_lines})
+
+
 @router.get("/settings/ntfy")
 async def settings_ntfy_get(session: str = Depends(require_session)):
     import ntfy_util

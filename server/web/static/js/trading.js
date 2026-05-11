@@ -387,6 +387,8 @@ function renderEvents(events, page) {
   tbody.innerHTML = '';
   for (const e of events) {
     const tr = document.createElement('tr');
+    tr.style.cursor = 'pointer';
+    tr.title = 'Click to view tick detail';
     const dt = new Date(e.time * 1000).toLocaleString();
     let details = '';
     try {
@@ -397,6 +399,7 @@ function renderEvents(events, page) {
         .join(' | ');
     } catch(_) {}
     tr.innerHTML = `<td>${dt}</td><td>${e.eventtype}</td><td class="small text-muted">${details}</td>`;
+    tr.addEventListener('click', () => openTickDetail(e.id));
     tbody.appendChild(tr);
   }
 
@@ -418,6 +421,59 @@ function renderEvents(events, page) {
       paginationEl.appendChild(btn);
     }
   }
+}
+
+// ------------------------------------------------------------------ tick detail modal
+
+async function openTickDetail(eventId) {
+  const contentEl = document.getElementById('tickDetailContent');
+  contentEl.innerHTML = '<div class="text-center py-4"><div class="spinner-border spinner-border-sm" role="status"></div> Loading…</div>';
+  const modal = new bootstrap.Modal(document.getElementById('tickDetailModal'));
+  modal.show();
+
+  try {
+    const resp = await fetch(`/api/live/tick_detail?event_id=${eventId}`);
+    if (!resp.ok) { contentEl.innerHTML = '<p class="text-danger">Failed to load tick detail.</p>'; return; }
+    const data = await resp.json();
+
+    let html = '';
+
+    // Events section
+    html += '<h6 class="fw-bold mb-2">Events</h6>';
+    if (data.events && data.events.length) {
+      html += '<table class="table table-sm table-bordered table-striped mb-3"><thead><tr><th>Time</th><th>Type</th><th>Data</th></tr></thead><tbody>';
+      for (const e of data.events) {
+        const dt = new Date(e.time * 1000).toLocaleString();
+        let dataStr = '';
+        try {
+          const d = JSON.parse(e.eventdata || '{}');
+          dataStr = Object.entries(d)
+            .map(([k,v]) => `<span class="text-muted">${k}:</span> ${typeof v==='number'?v.toFixed(6):v}`)
+            .join('<br>');
+        } catch(_) { dataStr = e.eventdata || ''; }
+        html += `<tr><td class="text-nowrap small">${dt}</td><td class="text-nowrap">${e.eventtype}</td><td class="small">${dataStr}</td></tr>`;
+      }
+      html += '</tbody></table>';
+    } else {
+      html += '<p class="text-muted small">No events found.</p>';
+    }
+
+    // Simlog section
+    html += '<h6 class="fw-bold mb-2">Simlog</h6>';
+    if (data.simlog && data.simlog.length) {
+      html += `<pre class="bg-dark text-light p-2 rounded small" style="white-space:pre-wrap;word-break:break-word;">${data.simlog.map(l => escHtml(l)).join('\n')}</pre>`;
+    } else {
+      html += '<p class="text-muted small">No log lines found for this tick.</p>';
+    }
+
+    contentEl.innerHTML = html;
+  } catch(e) {
+    contentEl.innerHTML = '<p class="text-danger">Error loading tick detail.</p>';
+  }
+}
+
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
 // ------------------------------------------------------------------ init on load
