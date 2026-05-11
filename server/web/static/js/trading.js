@@ -399,7 +399,7 @@ function renderEvents(events, page) {
         .join(' | ');
     } catch(_) {}
     tr.innerHTML = `<td>${dt}</td><td>${e.eventtype}</td><td class="small text-muted">${details}</td>`;
-    tr.addEventListener('click', () => openTickDetail(e.id));
+    tr.dataset.eventId = e.id;
     tbody.appendChild(tr);
   }
 
@@ -425,11 +425,20 @@ function renderEvents(events, page) {
 
 // ------------------------------------------------------------------ tick detail modal
 
+document.getElementById('eventbody').addEventListener('click', function(evt) {
+  const tr = evt.target.closest('tr[data-event-id]');
+  if (tr) openTickDetail(parseInt(tr.dataset.eventId));
+});
+
 async function openTickDetail(eventId) {
+  console.log('[tick detail] opening for event', eventId);
   const contentEl = document.getElementById('tickDetailContent');
+  if (!contentEl) { console.error('[tick detail] modal content element not found'); return; }
   contentEl.innerHTML = '<div class="text-center py-4"><div class="spinner-border spinner-border-sm" role="status"></div> Loading…</div>';
-  const modal = new bootstrap.Modal(document.getElementById('tickDetailModal'));
-  modal.show();
+  try {
+    const modal = bootstrap.Modal.getOrCreateInstance(document.getElementById('tickDetailModal'));
+    modal.show();
+  } catch(err) { console.error('[tick detail] modal error', err); return; }
 
   try {
     const resp = await fetch(`/api/live/tick_detail?event_id=${eventId}`);
