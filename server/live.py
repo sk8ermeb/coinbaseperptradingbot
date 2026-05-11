@@ -845,7 +845,11 @@ def start_trader(scriptid: int) -> LiveTrader:
         if _trader and _trader.running:
             _trader.stop()
             time.sleep(1)
-        lutil.setkeyval('live_log', '')
+        sep = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC") + ": ── session started ──"
+        existing = lutil.getkeyval('live_log') or ''
+        lines = existing.split('\n') if existing else []
+        lines.append(sep)
+        lutil.setkeyval('live_log', '\n'.join(lines[-500:]))
         _trader = LiveTrader(scriptid)
         _trader.start()
         return _trader
