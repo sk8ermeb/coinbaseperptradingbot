@@ -199,6 +199,7 @@ class LiveTrader:
             'pendingpositions': [], 'realposition': 0.0, 'costbasis': 0.0,
             'usd': 0.0, 'leverage': 10, 'makerfee': 0.0, 'takerfee': 0.0003,
             'cancel_order': self._cancel_order,
+            'simlog': self._livelog,
         }
         self.candle_history = []
         self._ind_history = {}
