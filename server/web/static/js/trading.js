@@ -353,6 +353,13 @@ function toggleIndicator(name, checkbox) {
   }
 }
 
+// ------------------------------------------------------------------ helpers
+
+function fmtUtc(unixSecs) {
+  const d = new Date(unixSecs * 1000);
+  return d.toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' UTC');
+}
+
 // ------------------------------------------------------------------ history tab
 
 let historyPage = 0;
@@ -375,7 +382,7 @@ function renderOrders(orders) {
   tbody.innerHTML = '';
   for (const o of orders) {
     const tr = document.createElement('tr');
-    const dt = new Date(o.time * 1000).toLocaleString();
+    const dt = fmtUtc(o.time);
     tr.innerHTML = `<td>${dt}</td><td>${o.tradetype}</td><td>${(o.amount||0).toFixed(4)}</td>` +
                    `<td>${o.limitprice||'—'}</td><td>${o.stopprice||'—'}</td><td>${o.status}</td>`;
     tbody.appendChild(tr);
@@ -389,7 +396,7 @@ function renderEvents(events, page) {
     const tr = document.createElement('tr');
     tr.style.cursor = 'pointer';
     tr.title = 'Click to view tick detail';
-    const dt = new Date(e.time * 1000).toLocaleString();
+    const dt = fmtUtc(e.time);
     let details = '';
     try {
       const d = JSON.parse(e.eventdata || '{}');
@@ -452,7 +459,7 @@ async function openTickDetail(eventId) {
     if (data.events && data.events.length) {
       html += '<table class="table table-sm table-bordered table-striped mb-3"><thead><tr><th>Time</th><th>Type</th><th>Data</th></tr></thead><tbody>';
       for (const e of data.events) {
-        const dt = new Date(e.time * 1000).toLocaleString();
+        const dt = fmtUtc(e.time);
         let dataStr = '';
         try {
           const d = JSON.parse(e.eventdata || '{}');

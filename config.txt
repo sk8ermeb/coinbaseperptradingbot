@@ -1,16 +1,16 @@
 #change to 0.0.0.0 to allow other machines to connect
-serverip:127.0.0.1
+serverip:0.0.0.0
 
 #change to 80 for default web port
-serverport:8080
+serverport:8083
 
 #don't require login to use the server
-anonymous:true
+anonymous:false
 
 #set a user name and password if anonomous is set to false.
 #this will be a simple login for the site.
 user:bob
-pass:password
+pass:1q@W3e$R
 
 #set this to true if you want interactions to be encrypted
 #definitely set to true if you set anonymous to false otherwise
@@ -20,6 +20,6 @@ pass:password
 #data file data/server.crt and data/server.pem for the cert and
 #key respectively. The system will autgenerate one if they aren't
 #present
-tls:false
+tls:true
 
 
