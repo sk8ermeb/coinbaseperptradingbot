@@ -492,6 +492,100 @@ function escHtml(s) {
   return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
+// ------------------------------------------------------------------ log modal
+
+function openLogModal() {
+  bootstrap.Modal.getOrCreateInstance(document.getElementById('logModal')).show();
+  // Defer scroll until the modal is laid out
+  setTimeout(() => {
+    const el = document.getElementById('livelog');
+    if (el) el.scrollTop = el.scrollHeight;
+  }, 50);
+}
+
+// ------------------------------------------------------------------ open orders modal
+
+let openOrdersTimer = null;
+
+async function refreshOpenOrdersCount() {
+  try {
+    const resp = await fetch('/api/live/open_orders');
+    if (!resp.ok) return;
+    const data = await resp.json();
+    const badge = document.getElementById('openOrdersCount');
+    if (!badge) return;
+    if (data.error) {
+      badge.textContent = '!';
+      badge.className = 'badge bg-danger ms-1';
+      badge.title = data.error;
+    } else {
+      const n = data.count || 0;
+      badge.textContent = n;
+      badge.className = 'badge ms-1 ' + (n > 0 ? 'bg-warning text-dark' : 'bg-secondary');
+      badge.title = '';
+    }
+  } catch(e) {}
+}
+
+function openOpenOrdersModal() {
+  bootstrap.Modal.getOrCreateInstance(document.getElementById('openOrdersModal')).show();
+  refreshOpenOrdersModal();
+}
+
+async function refreshOpenOrdersModal() {
+  const contentEl = document.getElementById('openOrdersContent');
+  contentEl.innerHTML = '<div class="text-center py-4"><div class="spinner-border spinner-border-sm" role="status"></div> Loading…</div>';
+  try {
+    const resp = await fetch('/api/live/open_orders');
+    const data = await resp.json();
+    if (data.error) {
+      contentEl.innerHTML = `<div class="alert alert-danger small mb-0">Error from Coinbase: ${escHtml(data.error)}</div>`;
+      return;
+    }
+    const orders = data.orders || [];
+    // Refresh badge to keep them in sync
+    const badge = document.getElementById('openOrdersCount');
+    if (badge) {
+      badge.textContent = orders.length;
+      badge.className = 'badge ms-1 ' + (orders.length > 0 ? 'bg-warning text-dark' : 'bg-secondary');
+    }
+    if (orders.length === 0) {
+      contentEl.innerHTML = '<p class="text-muted mb-0">No open orders on the exchange.</p>';
+      return;
+    }
+    let html = '<table class="table table-sm table-bordered table-striped mb-0"><thead><tr>' +
+      '<th>Created</th><th>Product</th><th>Side</th><th>Config</th>' +
+      '<th>Size</th><th>Limit</th><th>Stop</th><th>Status</th><th class="small">Order ID</th>' +
+      '</tr></thead><tbody>';
+    for (const o of orders) {
+      const cfg = o.order_configuration || {};
+      const cfgKey = Object.keys(cfg)[0] || '';
+      const cfgVal = cfg[cfgKey] || {};
+      const limit = cfgVal.limit_price || '—';
+      const stop = cfgVal.stop_price || '—';
+      const size = cfgVal.base_size || cfgVal.quote_size || '—';
+      let created = '—';
+      if (o.created_time) {
+        const t = Date.parse(o.created_time);
+        if (!isNaN(t)) created = fmtUtc(Math.floor(t / 1000));
+      }
+      html += `<tr><td class="small text-nowrap">${escHtml(created)}</td>` +
+        `<td>${escHtml(o.product_id || '')}</td>` +
+        `<td>${escHtml(o.side || '')}</td>` +
+        `<td class="small">${escHtml(cfgKey)}</td>` +
+        `<td>${escHtml(String(size))}</td>` +
+        `<td>${escHtml(String(limit))}</td>` +
+        `<td>${escHtml(String(stop))}</td>` +
+        `<td>${escHtml(o.status || '')}</td>` +
+        `<td class="small font-monospace">${escHtml(o.order_id || '')}</td></tr>`;
+    }
+    html += '</tbody></table>';
+    contentEl.innerHTML = html;
+  } catch(e) {
+    contentEl.innerHTML = `<div class="alert alert-danger small mb-0">Failed to load: ${escHtml(String(e))}</div>`;
+  }
+}
+
 // ------------------------------------------------------------------ init on load
 
 (async () => {
@@ -548,4 +642,9 @@ function escHtml(s) {
   // Fetch pair/granularity from selected script, then load chart
   await onScriptChange();
   if (!isRunning) loadCandles();
+
+  // Open-orders badge: refresh on load and every 30s
+  refreshOpenOrdersCount();
+  if (openOrdersTimer) clearInterval(openOrdersTimer);
+  openOrdersTimer = setInterval(refreshOpenOrdersCount, 30000);
 })();

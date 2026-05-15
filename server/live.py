@@ -582,7 +582,10 @@ class LiveTrader:
                     return o.get('order_id')
         except Exception:
             pass
-        self._livelog(f"Warning: could not resolve Coinbase order_id for client_order_id {client_order_id}")
+        self._livelog(
+            f"Warning: could not resolve Coinbase order_id for client_order_id {client_order_id}. "
+            f"Exchange response: {json.dumps(resp)[:800]}"
+        )
         return None
 
     # ------------------------------------------------------------------ cancel order

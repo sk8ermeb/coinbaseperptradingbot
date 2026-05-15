@@ -376,6 +376,19 @@ async def live_price(session: str = Depends(require_session)):
     return JSONResponse({'price': 0})
 
 
+@router.get("/live/open_orders")
+async def live_open_orders(session: str = Depends(require_session)):
+    """Live count + detail of OPEN orders on Coinbase for derivatives products."""
+    from coinbase_http import CoinbaseHTTP
+    try:
+        cb = CoinbaseHTTP()
+        data = cb.list_orders(order_status=['OPEN'], product_type='FUTURE', limit=100)
+        orders = data.get('orders', []) or []
+        return JSONResponse({'orders': orders, 'count': len(orders)})
+    except Exception as e:
+        return JSONResponse({'orders': [], 'count': None, 'error': str(e)})
+
+
 @router.get("/live/history")
 async def live_history(session: str = Depends(require_session), page: int = Query(0)):
     scriptid = autil.getkeyval('live_scriptid')

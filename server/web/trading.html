@@ -89,7 +89,7 @@
           <div class="card mb-2">
             <div class="card-header fw-bold">Account</div>
             <div class="card-body p-2 small">
-              <table class="table table-sm table-borderless mb-0">
+              <table class="table table-sm table-borderless mb-2">
                 <tbody>
                   <tr><th>Free Margin</th><td id="acc_usd">—</td></tr>
                   <tr><th>Total Equity</th><td id="acc_equity">—</td></tr>
@@ -103,12 +103,17 @@
                   <tr><th>Granularity</th><td id="acc_gran">—</td></tr>
                 </tbody>
               </table>
-            </div>
-          </div>
-          <div class="card">
-            <div class="card-header fw-bold">Log</div>
-            <div class="card-body p-2">
-              <div id="livelog" style="height:300px;overflow-y:auto;font-size:0.72rem;font-family:monospace;white-space:pre-wrap;"></div>
+              <div class="d-grid gap-2">
+                <button type="button" class="btn btn-sm btn-outline-secondary" id="openOrdersBtn"
+                        onclick="openOpenOrdersModal()" title="Open orders on the exchange">
+                  Open Orders
+                  <span id="openOrdersCount" class="badge bg-secondary ms-1">—</span>
+                </button>
+                <button type="button" class="btn btn-sm btn-outline-secondary" id="logBtn"
+                        onclick="openLogModal()" title="Live trading log">
+                  Log
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -138,6 +143,49 @@
     </div>
   </div>
 
+</div>
+
+<!-- Log Modal -->
+<div class="modal fade" id="logModal" tabindex="-1" aria-labelledby="logModalLabel" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header py-2">
+        <h6 class="modal-title mb-0" id="logModalLabel">Live Trading Log</h6>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body p-2">
+        <div id="livelog" style="height:60vh;overflow-y:auto;font-size:0.78rem;font-family:monospace;white-space:pre-wrap;"></div>
+      </div>
+      <div class="modal-footer py-2">
+        <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Open Orders Modal -->
+<div class="modal fade" id="openOrdersModal" tabindex="-1" aria-labelledby="openOrdersModalLabel" aria-hidden="true">
+  <div class="modal-dialog modal-xl modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header py-2">
+        <h6 class="modal-title mb-0" id="openOrdersModalLabel">Open Orders on Exchange</h6>
+        <div class="ms-auto d-flex align-items-center gap-2">
+          <button type="button" class="btn btn-sm btn-outline-secondary" onclick="refreshOpenOrdersModal()" title="Refresh">
+            <i class="bi bi-arrow-clockwise"></i>
+          </button>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+      </div>
+      <div class="modal-body p-3">
+        <div id="openOrdersContent">
+          <div class="text-center py-4"><div class="spinner-border spinner-border-sm" role="status"></div> Loading…</div>
+        </div>
+      </div>
+      <div class="modal-footer py-2">
+        <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Close</button>
+      </div>
+    </div>
+  </div>
 </div>
 
 <!-- Tick Detail Modal -->
