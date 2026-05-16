@@ -149,6 +149,17 @@ class CoinbaseHTTP:
         except json.JSONDecodeError:
             raise Exception(f"Non-JSON response from POST {path}: {text[:300]!r}")
 
+    # ------------------------------------------------------------------ key permissions
+
+    def get_key_permissions(self) -> dict:
+        """
+        GET /api/v3/brokerage/key_permissions
+        Returns: { can_view, can_trade, can_transfer, portfolio_uuid, portfolio_type }
+        Useful for diagnosing PERMISSION_DENIED errors — tells you exactly which
+        scopes the current key has and which portfolio it belongs to.
+        """
+        return self._get('/api/v3/brokerage/key_permissions')
+
     # ------------------------------------------------------------------ accounts
 
     def list_accounts(self, limit: int = None, cursor: str = None) -> dict:

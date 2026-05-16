@@ -340,13 +340,32 @@ async def live_balance(session: str = Depends(require_session)):
         bal = data.get('balance_summary', {})
         def _amount(key):
             v = bal.get(key, {})
-            return float(v.get('value', 0) or 0)
+            if isinstance(v, dict):
+                return float(v.get('value', 0) or 0)
+            return float(v or 0)
+        total = _amount('total_usd_balance')
+        initial_margin = _amount('initial_margin')
+        hold = _amount('total_open_orders_hold_amount')
+        unrealized = _amount('unrealized_pnl')
         available = _amount('available_margin')
         buying_power = _amount('futures_buying_power')
-        usd = available if available > 0 else buying_power
-        total = _amount('total_usd_balance') or usd
-        unrealized = _amount('unrealized_pnl')
-        return JSONResponse({'usd': round(usd, 2), 'total_equity': round(total, 2), 'unrealized_pnl': round(unrealized, 2)})
+        # Compute free margin from the atomic fields. Coinbase's `available_margin`
+        # has been observed to lag for INTX-opened positions, so we derive it.
+        usd_computed = total - initial_margin - hold
+        if usd_computed > 0:
+            usd = usd_computed
+        elif available > 0:
+            usd = available
+        else:
+            usd = buying_power
+        return JSONResponse({
+            'usd': round(usd, 2),
+            'total_equity': round(total or usd, 2),
+            'unrealized_pnl': round(unrealized, 2),
+            'initial_margin': round(initial_margin, 2),
+            'open_orders_hold': round(hold, 2),
+            'available_margin_raw': round(available, 2),
+        })
     except Exception:
         return JSONResponse({'usd': 0, 'total_equity': 0, 'unrealized_pnl': 0})
 
@@ -466,6 +485,17 @@ async def live_tick_detail(session: str = Depends(require_session),
             simlog_lines.append(line)
 
     return JSONResponse({'events': events, 'simlog': simlog_lines})
+
+
+@router.get("/key_permissions")
+async def key_permissions(session: str = Depends(require_session)):
+    """Diagnostic: return what the configured Coinbase API key is allowed to do."""
+    from coinbase_http import CoinbaseHTTP
+    try:
+        data = CoinbaseHTTP().get_key_permissions()
+        return JSONResponse(data)
+    except Exception as e:
+        return JSONResponse({'error': str(e)}, status_code=200)
 
 
 @router.get("/settings/ntfy")

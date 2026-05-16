@@ -300,7 +300,9 @@ class LiveTrader:
     def _read_account_state(self, product_id):
         cb = CoinbaseHTTP()
 
-        # Balance summary
+        # Balance summary — derive free margin from atomic fields (total - initial - holds)
+        # because Coinbase's `available_margin` has been observed to lag for INTX-opened
+        # positions. Fall back to available_margin / buying_power if the math yields 0.
         try:
             data = cb.get_balance_summary()
             bal = data.get('balance_summary', {})
@@ -309,13 +311,25 @@ class LiveTrader:
                 v = bal.get(key, {})
                 return float(v.get('value', 0) if isinstance(v, dict) else v or 0)
 
-            available = _amount('available_margin')
-            buying_power = _amount('futures_buying_power')
-            self.namespace['usd'] = available if available > 0 else buying_power
+            total          = _amount('total_usd_balance')
+            initial_margin = _amount('initial_margin')
+            hold           = _amount('total_open_orders_hold_amount')
+            available      = _amount('available_margin')
+            buying_power   = _amount('futures_buying_power')
+            unrealized     = _amount('unrealized_pnl')
+
+            usd_computed = total - initial_margin - hold
+            if usd_computed > 0:
+                self.namespace['usd'] = usd_computed
+            elif available > 0:
+                self.namespace['usd'] = available
+            else:
+                self.namespace['usd'] = buying_power
+
             self._livelog(
-                f"Available margin: ${self.namespace['usd']:.2f} | "
-                f"Buying power: ${buying_power:.2f} | "
-                f"Unrealized PnL: ${_amount('unrealized_pnl'):.2f}"
+                f"Free margin: ${self.namespace['usd']:.2f} "
+                f"(total ${total:.2f} − initial_margin ${initial_margin:.2f} − holds ${hold:.2f}) | "
+                f"Coinbase available_margin: ${available:.2f} | Unrealized PnL: ${unrealized:.2f}"
             )
         except Exception:
             self._livelog(f"Futures balance read error:\n{traceback.format_exc()}")
@@ -350,23 +364,54 @@ class LiveTrader:
             open_orders = cb.list_orders(product_id=product_id, order_status=['OPEN'])
             orders_list = open_orders.get('orders', [])
 
-            # Reconcile liveorder table: mark anything no longer open on Coinbase as filled
-            open_cb_ids = {o['order_id'] for o in orders_list if o.get('order_id')}
+            # Reconcile every tracked open order by asking Coinbase for its current
+            # state. This distinguishes fills, cancels, expirations, and failures
+            # (the old "missing from OPEN list = filled" assumption misclassified
+            # exchange-side cancels and expirations as fills).
             tracked = lutil.runselect(
-                "SELECT id, coinbase_order_id FROM liveorder WHERE scriptid=? AND status='open'",
+                "SELECT id, coinbase_order_id, tradetype, amount, limitprice, stopprice "
+                "FROM liveorder WHERE scriptid=? AND status='open'",
                 (self.scriptid,))
             for row in tracked:
-                if row['coinbase_order_id'] not in open_cb_ids:
-                    lutil.runupdate(
-                        "UPDATE liveorder SET status='filled' WHERE id=?", (row['id'],))
-                    self._livelog(f"Order {row['coinbase_order_id']} marked filled")
-                    self._log_event('fill:' + (row.get('tradetype') or 'order'), {
-                        'coinbase_order_id': row.get('coinbase_order_id'),
-                        'tradetype': row.get('tradetype'),
-                        'amount': row.get('amount', 0),
-                        'limitprice': row.get('limitprice', 0),
-                        'stopprice': row.get('stopprice', 0),
-                    })
+                cb_id = row['coinbase_order_id']
+                if not cb_id:
+                    continue
+                try:
+                    order = cb.get_order(cb_id).get('order', {}) or {}
+                except Exception:
+                    self._livelog(f"get_order failed for {cb_id}:\n{traceback.format_exc()}")
+                    continue
+                status = (order.get('status') or '').upper()
+                if status in ('OPEN', 'PENDING', 'QUEUED', ''):
+                    continue  # still working — leave the DB row alone
+                tt = row['tradetype'] or 'order'
+                evt = {
+                    'coinbase_order_id': cb_id,
+                    'tradetype': tt,
+                    'amount': row['amount'] or 0,
+                    'limitprice': row['limitprice'] or 0,
+                    'stopprice': row['stopprice'] or 0,
+                    'status': status,
+                    'filled_size': float(order.get('filled_size', 0) or 0),
+                    'average_filled_price': float(order.get('average_filled_price', 0) or 0),
+                    'completion_percentage': float(order.get('completion_percentage', 0) or 0),
+                }
+                if status == 'FILLED':
+                    lutil.runupdate("UPDATE liveorder SET status='filled' WHERE id=?", (row['id'],))
+                    self._livelog(
+                        f"Order {cb_id} FILLED {evt['filled_size']} @ {evt['average_filled_price']:.2f}"
+                    )
+                    self._log_event('fill:' + tt, evt)
+                elif status in ('CANCELLED', 'EXPIRED'):
+                    lutil.runupdate("UPDATE liveorder SET status='cancelled' WHERE id=?", (row['id'],))
+                    self._livelog(f"Order {cb_id} {status} on exchange (filled {evt['filled_size']})")
+                    self._log_event('cancel:' + tt, evt)
+                elif status == 'FAILED':
+                    lutil.runupdate("UPDATE liveorder SET status='failed' WHERE id=?", (row['id'],))
+                    self._livelog(f"Order {cb_id} FAILED on exchange")
+                    self._log_event('fail:' + tt, evt)
+                else:
+                    self._livelog(f"Order {cb_id} unknown status '{status}' — leaving open")
 
             pending = []
             for o in orders_list:
@@ -485,13 +530,14 @@ class LiveTrader:
                 # Step 2: place replacement order
                 try:
                     new_cb_id = str(uuid.uuid4())
-                    base_size = str(row['amount'])
+                    base_size = str(self._round_to_increment(float(row['amount'])))
                     pos = self.namespace.get('realposition', 0)
                     if new_stop > 0:
                         limit_price_for_stop = round(new_stop * (0.999 if pos > 0 else 1.001), 2)
                         stop_direction = 'STOP_DIRECTION_STOP_DOWN' if pos > 0 else 'STOP_DIRECTION_STOP_UP'
                         side = 'SELL' if pos > 0 else 'BUY'
-                        resp = cb.create_order(new_cb_id, product_id, side, {
+                        intent = f"TRAILING {side} stop {base_size} @ {new_stop:.2f}"
+                        resp = self._cb_create_order(cb, new_cb_id, product_id, side, {
                             'stop_limit_stop_limit_gtc': {
                                 'base_size': base_size,
                                 'limit_price': str(limit_price_for_stop),
@@ -499,16 +545,21 @@ class LiveTrader:
                                 'stop_direction': stop_direction,
                             }
                         })
+                        if not self._check_order_response(resp, intent): continue
                         new_cb_id = self._get_cb_order_id(resp, new_cb_id, product_id) or new_cb_id
                     elif tradetype == 'Buy':
-                        resp = cb.create_order(new_cb_id, product_id, 'BUY', {
+                        intent = f"TRAILING BUY limit {base_size} @ {new_limit:.2f}"
+                        resp = self._cb_create_order(cb, new_cb_id, product_id, 'BUY', {
                             'limit_limit_gtc': {'base_size': base_size, 'limit_price': str(round(new_limit, 2))}
                         })
+                        if not self._check_order_response(resp, intent): continue
                         new_cb_id = self._get_cb_order_id(resp, new_cb_id, product_id) or new_cb_id
                     elif tradetype in ('Sell', 'Exit'):
-                        resp = cb.create_order(new_cb_id, product_id, 'SELL', {
+                        intent = f"TRAILING SELL limit {base_size} @ {new_limit:.2f}"
+                        resp = self._cb_create_order(cb, new_cb_id, product_id, 'SELL', {
                             'limit_limit_gtc': {'base_size': base_size, 'limit_price': str(round(new_limit, 2))}
                         })
+                        if not self._check_order_response(resp, intent): continue
                         new_cb_id = self._get_cb_order_id(resp, new_cb_id, product_id) or new_cb_id
                     lutil.runupdate(
                         "UPDATE liveorder SET coinbase_order_id=?, limitprice=?, stopprice=? WHERE id=?",
@@ -553,11 +604,32 @@ class LiveTrader:
             self._livelog(f"Could not load product limits:\n{traceback.format_exc()}")
 
     def _round_to_increment(self, size: float) -> float:
-        inc = getattr(self, '_base_increment', None)
+        # Perp products on Coinbase only accept whole-contract base_size — i.e. a
+        # multiple of contract_size (e.g. 0.01 BTC for BTC-PERP-INTX), not the
+        # looser base_increment (0.0001). Round to whichever is larger so the
+        # request matches what the venue actually accepts.
+        inc = max(getattr(self, '_base_increment', 0) or 0,
+                  getattr(self, '_contract_size', 0) or 0)
         if not inc or inc <= 0:
             return round(size, 8)
         factor = round(1 / inc)
         return math.floor(size * factor) / factor
+
+    def _cb_create_order(self, cb, client_order_id, product_id, side, order_configuration):
+        """All perp orders go through here so leverage + margin_type are always
+        set. Per Coinbase docs:
+          - leverage defaults to "1.0" if omitted (wrong for perp strategies).
+          - margin_type defaults to CROSS, explicit is safer.
+          - retail_portfolio_id is deprecated for CDP keys, do NOT send."""
+        leverage = self.namespace.get('leverage', 1)
+        try:
+            lev_str = f"{float(leverage):.1f}"
+        except Exception:
+            lev_str = str(leverage)
+        return cb.create_order(
+            client_order_id, product_id, side, order_configuration,
+            leverage=lev_str, margin_type='CROSS',
+        )
 
     def _cap_base_size(self, base_size_f):
         base_size_f = self._round_to_increment(base_size_f)
@@ -568,6 +640,39 @@ class LiveTrader:
             self._livelog(f"base_size {base_size_f} below min {self._min_base_size} — order skipped")
             return 0.0
         return base_size_f
+
+    def _check_order_response(self, resp, intent_label):
+        """Inspect a Coinbase create_order response. On rejection, log a clear
+        error line and fire an `error:order_rejected` event (for push). Returns
+        True on success, False on failure — callers should bail on False so the
+        success-style log and `create:*` event do not fire for a phantom order."""
+        if not isinstance(resp, dict):
+            self._notify_order_error(intent_label, 'INVALID_RESPONSE', str(resp)[:300])
+            return False
+        # API-level error (auth, permission, malformed request) — top-level
+        # 'error' key with no success_response.
+        if resp.get('error') and not resp.get('success_response'):
+            reason = resp.get('error') or 'UNKNOWN'
+            message = resp.get('message') or resp.get('error_details') or ''
+            self._notify_order_error(intent_label, reason, message)
+            return False
+        # Order-level rejection — success: false with error_response populated.
+        if resp.get('success') is False:
+            err = resp.get('error_response') or {}
+            reason = (err.get('error')
+                      or resp.get('failure_reason')
+                      or err.get('preview_failure_reason')
+                      or 'UNKNOWN')
+            message = err.get('message') or err.get('error_details') or ''
+            self._notify_order_error(intent_label, reason, message)
+            return False
+        return True
+
+    def _notify_order_error(self, intent_label, reason, message):
+        self._livelog(f"ORDER REJECTED [{reason}] {intent_label}: {message}")
+        self._log_event('error:order_rejected', {
+            'intent': intent_label, 'reason': reason, 'message': message,
+        })
 
     def _get_cb_order_id(self, resp, client_order_id, product_id):
         """Extract Coinbase order_id from response dict; fall back to open-order lookup."""
@@ -645,31 +750,40 @@ class LiveTrader:
                 if pos == 0:
                     self._livelog("Exit requested but no open position")
                     return
-                close_qty = abs(pos) if amount == 0 else amount
+                close_qty = abs(pos) if amount == 0 else min(amount, abs(pos))
                 close_qty = self._round_to_increment(close_qty)
+                if close_qty <= 0:
+                    self._livelog(f"Exit skipped — close_qty {close_qty} below whole-contract granularity")
+                    return
                 base_size = str(close_qty)
                 if limitprice > 0:
                     side = 'SELL' if pos > 0 else 'BUY'
-                    resp = cb.create_order(order_id, product_id, side, {
+                    intent = f"EXIT limit {'sell' if pos>0 else 'buy'} {base_size} @ {limitprice}"
+                    resp = self._cb_create_order(cb, order_id, product_id, side, {
                         'limit_limit_gtc': {'base_size': base_size, 'limit_price': str(round(limitprice, 2))}
                     })
+                    if not self._check_order_response(resp, intent): return
                     cb_order_id = self._get_cb_order_id(resp, order_id, product_id)
-                    self._livelog(f"EXIT limit {'sell' if pos>0 else 'buy'} {base_size} @ {limitprice}")
+                    self._livelog(intent)
                 else:
                     side = 'SELL' if pos > 0 else 'BUY'
-                    resp = cb.create_order(order_id, product_id, side, {
+                    intent = f"EXIT market {'sell' if pos>0 else 'buy'} {base_size}"
+                    resp = self._cb_create_order(cb, order_id, product_id, side, {
                         'market_market_ioc': {'base_size': base_size}
                     })
+                    if not self._check_order_response(resp, intent): return
                     cb_order_id = self._get_cb_order_id(resp, order_id, product_id)
-                    self._livelog(f"EXIT market {'sell' if pos>0 else 'buy'} {base_size}")
+                    self._livelog(intent)
 
             elif tradetype == util.TradeType.Buy:
                 if realposition < 0:
                     close_id = str(uuid.uuid4())
-                    base_size = str(round(abs(realposition), 8))
-                    cb.create_order(close_id, product_id, 'BUY', {
+                    base_size = str(self._round_to_increment(abs(realposition)))
+                    intent = f"BUY: close short {base_size} at market"
+                    resp = self._cb_create_order(cb, close_id, product_id, 'BUY', {
                         'market_market_ioc': {'base_size': base_size}
                     })
+                    if not self._check_order_response(resp, intent): return
                     self._livelog(f"BUY: closed short {base_size} at market")
                     realposition = 0.0
 
@@ -677,16 +791,19 @@ class LiveTrader:
                     bs = self._cap_base_size(round(amount_notional / limitprice, 8))
                     if bs <= 0: return
                     base_size = str(bs)
-                    resp = cb.create_order(order_id, product_id, 'BUY', {
+                    intent = f"BUY limit {base_size} @ {limitprice}"
+                    resp = self._cb_create_order(cb, order_id, product_id, 'BUY', {
                         'limit_limit_gtc': {'base_size': base_size, 'limit_price': str(round(limitprice, 2))}
                     })
+                    if not self._check_order_response(resp, intent): return
                     cb_order_id = self._get_cb_order_id(resp, order_id, product_id)
-                    self._livelog(f"BUY limit {base_size} @ {limitprice}")
+                    self._livelog(intent)
                 elif stopprice > 0:
                     bs = self._cap_base_size(round(amount_notional / stopprice, 8))
                     if bs <= 0: return
                     base_size = str(bs)
-                    resp = cb.create_order(order_id, product_id, 'BUY', {
+                    intent = f"BUY stop {base_size} @ {stopprice}"
+                    resp = self._cb_create_order(cb, order_id, product_id, 'BUY', {
                         'stop_limit_stop_limit_gtc': {
                             'base_size': base_size,
                             'limit_price': str(round(stopprice * 1.001, 2)),
@@ -694,25 +811,30 @@ class LiveTrader:
                             'stop_direction': 'STOP_DIRECTION_STOP_UP',
                         }
                     })
+                    if not self._check_order_response(resp, intent): return
                     cb_order_id = self._get_cb_order_id(resp, order_id, product_id)
-                    self._livelog(f"BUY stop {base_size} @ {stopprice}")
+                    self._livelog(intent)
                 else:
                     bs = self._cap_base_size(round(amount_notional / close_price, 8))
                     if bs <= 0: return
                     base_size = str(bs)
-                    resp = cb.create_order(order_id, product_id, 'BUY', {
+                    intent = f"BUY market {base_size} contracts"
+                    resp = self._cb_create_order(cb, order_id, product_id, 'BUY', {
                         'market_market_ioc': {'base_size': base_size}
                     })
+                    if not self._check_order_response(resp, intent): return
                     cb_order_id = self._get_cb_order_id(resp, order_id, product_id)
-                    self._livelog(f"BUY market {base_size} contracts")
+                    self._livelog(intent)
 
             elif tradetype == util.TradeType.Sell:
                 if realposition > 0:
                     close_id = str(uuid.uuid4())
-                    base_size = str(round(realposition, 8))
-                    cb.create_order(close_id, product_id, 'SELL', {
+                    base_size = str(self._round_to_increment(realposition))
+                    intent = f"SELL: close long {base_size} at market"
+                    resp = self._cb_create_order(cb, close_id, product_id, 'SELL', {
                         'market_market_ioc': {'base_size': base_size}
                     })
+                    if not self._check_order_response(resp, intent): return
                     self._livelog(f"SELL: closed long {base_size} at market")
                     realposition = 0.0
 
@@ -720,16 +842,19 @@ class LiveTrader:
                     bs = self._cap_base_size(round(amount_notional / limitprice, 8))
                     if bs <= 0: return
                     base_size = str(bs)
-                    resp = cb.create_order(order_id, product_id, 'SELL', {
+                    intent = f"SELL limit {base_size} @ {limitprice}"
+                    resp = self._cb_create_order(cb, order_id, product_id, 'SELL', {
                         'limit_limit_gtc': {'base_size': base_size, 'limit_price': str(round(limitprice, 2))}
                     })
+                    if not self._check_order_response(resp, intent): return
                     cb_order_id = self._get_cb_order_id(resp, order_id, product_id)
-                    self._livelog(f"SELL limit {base_size} @ {limitprice}")
+                    self._livelog(intent)
                 elif stopprice > 0:
                     bs = self._cap_base_size(round(amount_notional / stopprice, 8))
                     if bs <= 0: return
                     base_size = str(bs)
-                    resp = cb.create_order(order_id, product_id, 'SELL', {
+                    intent = f"SELL stop {base_size} @ {stopprice}"
+                    resp = self._cb_create_order(cb, order_id, product_id, 'SELL', {
                         'stop_limit_stop_limit_gtc': {
                             'base_size': base_size,
                             'limit_price': str(round(stopprice * 0.999, 2)),
@@ -737,17 +862,20 @@ class LiveTrader:
                             'stop_direction': 'STOP_DIRECTION_STOP_DOWN',
                         }
                     })
+                    if not self._check_order_response(resp, intent): return
                     cb_order_id = self._get_cb_order_id(resp, order_id, product_id)
-                    self._livelog(f"SELL stop {base_size} @ {stopprice}")
+                    self._livelog(intent)
                 else:
                     bs = self._cap_base_size(round(amount_notional / close_price, 8))
                     if bs <= 0: return
                     base_size = str(bs)
-                    resp = cb.create_order(order_id, product_id, 'SELL', {
+                    intent = f"SELL market {base_size} contracts"
+                    resp = self._cb_create_order(cb, order_id, product_id, 'SELL', {
                         'market_market_ioc': {'base_size': base_size}
                     })
+                    if not self._check_order_response(resp, intent): return
                     cb_order_id = self._get_cb_order_id(resp, order_id, product_id)
-                    self._livelog(f"SELL market {base_size} contracts")
+                    self._livelog(intent)
 
             # Track order in DB for trailing management
             if cb_order_id and (ltp > 0 or stp > 0):

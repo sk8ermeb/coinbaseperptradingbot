@@ -29,17 +29,18 @@ def get_prefs():
         'notify_cancel': _get('cancel', 'true'),
         'notify_create': _get('create', 'true'),
         'notify_user':   _get('user',   'false'),
+        'notify_error':  _get('error',  'true'),
     }
 
 def set_prefs(prefs):
-    for key in ('notify_fill', 'notify_cancel', 'notify_create', 'notify_user'):
+    for key in ('notify_fill', 'notify_cancel', 'notify_create', 'notify_user', 'notify_error'):
         if key in prefs:
             _u().setkeyval(f'ntfy_{key}', prefs[key])
 
 def _is_enabled(prefix):
     val = _u().getkeyval(f'ntfy_notify_{prefix}')
     if val is None:
-        return prefix in ('fill', 'cancel', 'create')
+        return prefix in ('fill', 'cancel', 'create', 'error')
     return val == 'true'
 
 def _do_send(ntfy_uuid, title, body):

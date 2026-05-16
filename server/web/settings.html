@@ -26,6 +26,11 @@
           onclick="saveCredential('cbsecret')">
     Save
   </button>
+  <hr>
+  <button type="button" class="btn btn-outline-secondary btn-sm" onclick="checkKeyPermissions()">
+    Check API Key Permissions
+  </button>
+  <div id="keyPermsResult" class="mt-2 small"></div>
 </div>
 
 <div class="border border-3 border-primary rounded-4 shadow-lg p-3 m-3 bg-white">
@@ -61,6 +66,10 @@
         <div class="form-check">
           <input class="form-check-input" type="checkbox" id="ntfy_user" onchange="saveNtfyPrefs()">
           <label class="form-check-label" for="ntfy_user">User</label>
+        </div>
+        <div class="form-check">
+          <input class="form-check-input" type="checkbox" id="ntfy_error" onchange="saveNtfyPrefs()">
+          <label class="form-check-label" for="ntfy_error">Errors</label>
         </div>
       </div>
       <button class="btn btn-outline-primary btn-sm" onclick="testNtfy()">

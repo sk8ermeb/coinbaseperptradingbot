@@ -89,6 +89,7 @@ async function loadNtfySettings() {
     set('ntfy_fill',   data.notify_fill);
     set('ntfy_cancel', data.notify_cancel);
     set('ntfy_create', data.notify_create);
+    set('ntfy_error',  data.notify_error);
     const userEl = document.getElementById('ntfy_user');
     if (userEl) userEl.checked = data.notify_user === 'true';
   } catch(e) {}
@@ -104,6 +105,7 @@ async function saveNtfyPrefs() {
       notify_cancel: bool('ntfy_cancel'),
       notify_create: bool('ntfy_create'),
       notify_user:   bool('ntfy_user'),
+      notify_error:  bool('ntfy_error'),
     }),
   });
 }
@@ -116,6 +118,37 @@ function copyNtfyTopic() {
     document.execCommand('copy');
     showMessage('Topic copied');
   });
+}
+
+async function checkKeyPermissions() {
+  const out = document.getElementById('keyPermsResult');
+  out.innerHTML = '<span class="text-muted">Checking…</span>';
+  try {
+    const resp = await fetch('/api/key_permissions');
+    const data = await resp.json();
+    if (data.error) {
+      out.innerHTML = `<div class="alert alert-danger py-2 mb-0">Error: ${escapeHtml(data.error)}</div>`;
+      return;
+    }
+    const yes = '<span class="badge bg-success">yes</span>';
+    const no  = '<span class="badge bg-danger">no</span>';
+    const row = (label, val) => `<tr><th class="pe-3">${label}</th><td>${val}</td></tr>`;
+    const bool = v => (v === true ? yes : v === false ? no : `<code>${escapeHtml(String(v))}</code>`);
+    out.innerHTML =
+      '<table class="table table-sm table-borderless mb-0"><tbody>' +
+      row('can_view',       bool(data.can_view)) +
+      row('can_trade',      bool(data.can_trade)) +
+      row('can_transfer',   bool(data.can_transfer)) +
+      row('portfolio_type', `<code>${escapeHtml(String(data.portfolio_type ?? ''))}</code>`) +
+      row('portfolio_uuid', `<code class="small">${escapeHtml(String(data.portfolio_uuid ?? ''))}</code>`) +
+      '</tbody></table>';
+  } catch(e) {
+    out.innerHTML = `<div class="alert alert-danger py-2 mb-0">Request failed: ${escapeHtml(String(e))}</div>`;
+  }
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
 async function testNtfy() {

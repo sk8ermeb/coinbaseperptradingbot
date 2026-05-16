@@ -7,6 +7,7 @@ let candleslist = [];
 let colors = ['#FF11FF','#11FFFF','#FFFF11','#AAAAFF','#AAFFAA','#FFAAAA','#FFFFFF','#AAAAAA'];
 let pollTimer = null;
 let pricePollTimer = null;
+let idleBalanceTimer = null;
 let isRunning = false;
 let granularityLocked = false;
 let currentPair = 'btc';
@@ -165,6 +166,7 @@ let _fastPollCount = 0;
 function startPolling() {
   if (pollTimer) clearInterval(pollTimer);
   if (pricePollTimer) clearInterval(pricePollTimer);
+  if (idleBalanceTimer) { clearInterval(idleBalanceTimer); idleBalanceTimer = null; }
 
   // Poll every 3s for the first 30s so account data appears as soon as the
   // backend finishes reading balance/position (before history load completes).
@@ -185,6 +187,10 @@ function startPolling() {
 function stopPolling() {
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
   if (pricePollTimer) { clearInterval(pricePollTimer); pricePollTimer = null; }
+  // Resume idle balance polling now that the bot isn't running
+  if (idleBalanceTimer) clearInterval(idleBalanceTimer);
+  refreshIdleBalance();
+  idleBalanceTimer = setInterval(refreshIdleBalance, 15000);
 }
 
 async function pollStatus() {
@@ -203,6 +209,22 @@ async function pollStatus() {
       lastTickTime = data.last_tick_time;
       loadCandles(false);
     }
+  } catch(e) {}
+}
+
+async function refreshIdleBalance() {
+  if (isRunning) return;
+  try {
+    const balResp = await fetch('/api/live/balance');
+    if (!balResp.ok) return;
+    const bal = await balResp.json();
+    document.getElementById('acc_usd').textContent    = '$' + fmt(bal.usd);
+    document.getElementById('acc_equity').textContent = '$' + fmt(bal.total_equity);
+    const pnlEl = document.getElementById('acc_upnl');
+    pnlEl.textContent = (bal.unrealized_pnl >= 0 ? '+' : '') + '$' + fmt(bal.unrealized_pnl);
+    pnlEl.style.color = bal.unrealized_pnl >= 0 ? '#26a69a' : '#ef5350';
+    document.getElementById('lastupdate').textContent =
+      'Balance updated ' + new Date().toLocaleTimeString();
   } catch(e) {}
 }
 
@@ -626,17 +648,9 @@ async function refreshOpenOrdersModal() {
 
   if (!isRunning) {
     updateProductPanel();
-    try {
-      const balResp = await fetch('/api/live/balance');
-      if (balResp.ok) {
-        const bal = await balResp.json();
-        document.getElementById('acc_usd').textContent    = '$' + fmt(bal.usd);
-        document.getElementById('acc_equity').textContent = '$' + fmt(bal.total_equity);
-        const pnlEl = document.getElementById('acc_upnl');
-        pnlEl.textContent = (bal.unrealized_pnl >= 0 ? '+' : '') + '$' + fmt(bal.unrealized_pnl);
-        pnlEl.style.color = bal.unrealized_pnl >= 0 ? '#26a69a' : '#ef5350';
-      }
-    } catch(e) {}
+    refreshIdleBalance();
+    if (idleBalanceTimer) clearInterval(idleBalanceTimer);
+    idleBalanceTimer = setInterval(refreshIdleBalance, 15000);
   }
 
   // Fetch pair/granularity from selected script, then load chart

@@ -577,7 +577,7 @@ class Simulation:
                         if ltp_val > 0:
                             pass
                         elif (cur_pos > 0 and high >= limitprice) or (cur_pos < 0 and low <= limitprice):
-                            close_qty = abs(cur_pos) if amount == 0 else amount
+                            close_qty = abs(cur_pos) if amount == 0 else min(self._floor_contracts(amount), abs(cur_pos))
                             crypt = -close_qty if cur_pos > 0 else close_qty
                             # Long exit limit is above market; short exit limit is below market.
                             # If candle opened past the limit, it crossed immediately → taker fee.
@@ -664,7 +664,7 @@ class Simulation:
                         cur_pos = self.namespace['realposition']
                         # Stop-loss: exit long when price drops, exit short when price rises
                         if (cur_pos > 0 and low <= stopprice) or (cur_pos < 0 and high >= stopprice):
-                            close_qty = abs(cur_pos) if amount == 0 else amount
+                            close_qty = abs(cur_pos) if amount == 0 else min(self._floor_contracts(amount), abs(cur_pos))
                             crypt = -close_qty if cur_pos > 0 else close_qty
                             newprice, newamount, newusd, fee, notional = self.updatecostbasis(stopprice, crypt, takerfee)
                             direction = "Long" if cur_pos > 0 else "Short"
@@ -939,7 +939,7 @@ class Simulation:
                         cur_pos = self.namespace['realposition']
                         if cur_pos == 0:
                             return True
-                        close_qty = abs(cur_pos) if pos_amount == 0 else pos_amount
+                        close_qty = abs(cur_pos) if pos_amount == 0 else min(self._floor_contracts(pos_amount), abs(cur_pos))
                         crypt = -close_qty if cur_pos > 0 else close_qty
                         direction = "long" if cur_pos > 0 else "short"
                         notes = f"Exit: closing {direction} position"
