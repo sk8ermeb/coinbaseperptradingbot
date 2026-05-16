@@ -338,6 +338,13 @@ class LiveTrader:
             else:
                 self.namespace['usd'] = buying_power
 
+            # Store Coinbase-reported values so get_status() can return them
+            # directly instead of recomputing (the local locked/upnl math used
+            # the script's leverage and ignored contract_size — wildly wrong).
+            self.namespace['unrealized_pnl'] = unrealized
+            self.namespace['total_equity'] = total
+            self.namespace['initial_margin'] = initial_margin
+
             self._livelog(
                 f"Free margin: ${self.namespace['usd']:.2f} "
                 f"(total ${total:.2f} − initial_margin ${initial_margin:.2f} − holds ${hold:.2f}) | "
@@ -763,14 +770,12 @@ class LiveTrader:
         leverage = self.namespace.get('leverage', 10)
         realposition = self.namespace.get('realposition', 0.0)
 
-        # Auto-size: total equity × leverage × 0.99
+        # Auto-size: total equity × leverage × 0.99 (use Coinbase-reported
+        # equity so we don't recompute locked/upnl with wrong contract_size).
         if amount == 0:
             usd = self.namespace.get('usd', 0)
-            costbasis = self.namespace.get('costbasis', 0)
-            locked = abs(realposition) * costbasis / leverage if realposition and costbasis else 0
-            upnl = (close_price - costbasis) * realposition if realposition > 0 else \
-                   (costbasis - close_price) * abs(realposition) if realposition < 0 else 0
-            total_eq = usd + locked + upnl
+            upnl = self.namespace.get('unrealized_pnl', 0.0)
+            total_eq = self.namespace.get('total_equity', 0.0) or (usd + upnl)
             amount_notional = total_eq * leverage * 0.99
         else:
             amount_notional = amount
@@ -974,8 +979,11 @@ class LiveTrader:
         pos = self.namespace.get('realposition', 0)
         cb = self.namespace.get('costbasis', 0)
         lev = self.namespace.get('leverage', 10)
-        locked = abs(pos) * cb / lev if pos and cb else 0
-        upnl = (close - cb) * pos if pos > 0 else (cb - close) * abs(pos) if pos < 0 else 0
+        # Prefer Coinbase-reported equity/PnL — the local locked/upnl math
+        # used script leverage and ignored contract_size, which is wrong on
+        # INTX (e.g. BTC contract = 0.01 BTC, max 3.3x not 10x).
+        upnl = self.namespace.get('unrealized_pnl', 0.0)
+        total_equity = self.namespace.get('total_equity', 0.0) or (usd + upnl)
         return {
             'running': self.running,
             'scriptid': self.scriptid,
@@ -986,7 +994,8 @@ class LiveTrader:
             'costbasis': round(cb, 2),
             'close': close,
             'unrealized_pnl': round(upnl, 2),
-            'total_equity': round(usd + locked + upnl, 2),
+            'total_equity': round(total_equity, 2),
+            'initial_margin': round(self.namespace.get('initial_margin', 0.0), 2),
             'leverage': lev,
             'contract_size': self._contract_size,
             'base_increment': self._base_increment,

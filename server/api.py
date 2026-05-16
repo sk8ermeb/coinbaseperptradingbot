@@ -302,29 +302,37 @@ async def live_status(session: str = Depends(require_session)):
             'close': 0, 'unrealized_pnl': 0, 'total_equity': 0,
             'leverage': 10, 'log': [],
         })
+    # If the trader has stopped, its namespace is frozen at the last tick —
+    # which means a position closed off-tick (e.g. user sold manually) keeps
+    # showing the old contract count. Re-read from Coinbase before returning.
+    if not trader.running and trader.pair:
+        try:
+            trader._read_account_state(trader.pair)
+        except Exception:
+            pass
     return JSONResponse(trader.get_status())
 
 
 @router.get("/live/candles")
 async def live_candles(session: str = Depends(require_session),
-                       pair: str = Query(None),
+                       product_id: str = Query(None),
                        granularity: str = Query(None)):
     trader = live_module.get_trader()
     if trader and trader.running:
-        use_pair = trader.pair
+        use_product = trader.pair
         use_gran = trader.granularity
     else:
-        use_pair = pair or autil.getkeyval('live_pair') or 'btc'
+        use_product = product_id or autil.getkeyval('live_pair') or ''
         use_gran = granularity or autil.getkeyval('live_granularity') or 'ONE_HOUR'
 
-    # live_pair now stores the full product_id (e.g. 'BIP-20DEC30-CDE'). Legacy
-    # rows held only the short code 'btc' — auto-expand those for backwards compat.
-    product_id = use_pair if (use_pair and '-' in use_pair) else (use_pair.upper() + '-PERP-INTX')
+    if not use_product:
+        return JSONResponse({'candles': [], 'indicators': {}})
+
     gran_secs = live_module.GRAN_SECONDS.get(use_gran, 3600)
     import time as _time
     now = int(_time.time())
     start = now - 1000 * gran_secs
-    candles = autil.gethistoricledata(use_gran, product_id, start, now)
+    candles = autil.gethistoricledata(use_gran, use_product, start, now)
 
     indicators = {}
     if trader and trader._ind_history:
@@ -382,8 +390,9 @@ async def live_balance(session: str = Depends(require_session)):
 async def live_price(session: str = Depends(require_session)):
     from coinbase_http import CoinbaseHTTP
     trader = live_module.get_trader()
-    use_pair = (trader.pair if trader else None) or autil.getkeyval('live_pair') or 'btc'
-    product_id = use_pair if (use_pair and '-' in use_pair) else (use_pair.upper() + '-PERP-INTX')
+    product_id = (trader.pair if trader else None) or autil.getkeyval('live_pair') or ''
+    if not product_id:
+        return JSONResponse({'price': 0})
     try:
         cb = CoinbaseHTTP()
         product = cb.get_product(product_id)
@@ -401,6 +410,93 @@ async def live_price(session: str = Depends(require_session)):
     except Exception:
         pass
     return JSONResponse({'price': 0})
+
+
+@router.get("/live/account")
+async def live_account(session: str = Depends(require_session),
+                       product_id: str = Query(...)):
+    """Unified account snapshot for a single product, pulled live from Coinbase.
+    Used by the trading page on load and on product change so values always
+    reflect the exchange state — not local calculations that depend on
+    contract_size / leverage assumptions that drift from reality."""
+    from coinbase_http import CoinbaseHTTP, KNOWN_CONTRACT_SIZES
+    cb = CoinbaseHTTP()
+    out = {
+        'product_id': product_id,
+        'usd': 0.0, 'total_equity': 0.0, 'unrealized_pnl': 0.0,
+        'initial_margin': 0.0, 'open_orders_hold': 0.0,
+        'realposition': 0.0, 'costbasis': 0.0,
+        'mark_price': 0.0, 'contract_size': None, 'base_increment': None,
+        'max_leverage': None, 'product_venue': '', 'base_currency': '',
+        'errors': {},
+    }
+
+    # Balance summary — equity/PnL/margin live numbers
+    try:
+        bal = (cb.get_balance_summary() or {}).get('balance_summary', {}) or {}
+        def _amt(key):
+            v = bal.get(key, {})
+            return float(v.get('value', 0) or 0) if isinstance(v, dict) else float(v or 0)
+        total = _amt('total_usd_balance')
+        initial_margin = _amt('initial_margin')
+        hold = _amt('total_open_orders_hold_amount')
+        unrealized = _amt('unrealized_pnl')
+        available = _amt('available_margin')
+        buying_power = _amt('futures_buying_power')
+        usd_computed = total - initial_margin - hold
+        out['usd']               = round(usd_computed if usd_computed > 0 else (available or buying_power), 2)
+        out['total_equity']      = round(total, 2)
+        out['unrealized_pnl']    = round(unrealized, 2)
+        out['initial_margin']    = round(initial_margin, 2)
+        out['open_orders_hold']  = round(hold, 2)
+    except Exception as e:
+        out['errors']['balance'] = str(e)
+
+    # Position — contracts + average entry. No position → zeros (not an error).
+    try:
+        pos = (cb.get_position(product_id) or {}).get('position') or {}
+        contracts = float(pos.get('number_of_contracts', 0) or 0)
+        if (pos.get('side') or '').upper() == 'SHORT':
+            contracts = -contracts
+        out['realposition'] = contracts
+        out['costbasis']    = round(float(pos.get('avg_entry_price', 0) or 0), 2)
+    except Exception as e:
+        out['errors']['position'] = str(e)
+
+    # Product details — mark price, contract size, venue, max leverage
+    try:
+        product = cb.get_product(product_id) or {}
+        try:
+            if isinstance(product, dict) and product.get('product_id'):
+                autil.upsert_futures_product(product)
+        except Exception:
+            pass
+        bid = float(product.get('best_bid_price') or 0)
+        ask = float(product.get('best_ask_price') or 0)
+        if bid > 0 and ask > 0: mark = (bid + ask) / 2
+        elif bid > 0:           mark = bid
+        elif ask > 0:           mark = ask
+        else:                   mark = float(product.get('price') or 0)
+        out['mark_price'] = round(mark, 2)
+        out['base_increment'] = float(product.get('base_increment') or 0) or None
+        out['product_venue']  = (product.get('product_venue') or '').upper()
+        out['base_currency']  = (product.get('base_currency_id') or product.get('base_name') or '').upper()
+        fpd = product.get('future_product_details') or {}
+        api_cs = float(fpd.get('contract_size') or 0) or None
+        # INTX contract_size from the API is unreliable post-merger; prefer hardcoded.
+        known = KNOWN_CONTRACT_SIZES.get(product_id)
+        if out['product_venue'] == 'INTX' and known is not None:
+            out['contract_size'] = known
+        else:
+            out['contract_size'] = api_cs or known
+        pd = fpd.get('perpetual_details') or {}
+        ml = float(pd.get('max_leverage') or 0)
+        if ml > 0:
+            out['max_leverage'] = ml
+    except Exception as e:
+        out['errors']['product'] = str(e)
+
+    return JSONResponse(out)
 
 
 @router.get("/live/open_orders")

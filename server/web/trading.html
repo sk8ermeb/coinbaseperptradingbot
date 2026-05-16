@@ -7,23 +7,6 @@
   <div class="row align-items-center g-2 flex-wrap">
 
     <div class="col-auto">
-      <select class="form-select" id="productDropdown" onchange="onProductChange()">
-        <option value="btc">BTC-PERP-INTX</option>
-        <option value="eth">ETH-PERP-INTX</option>
-        <option value="sol">SOL-PERP-INTX</option>
-        <option value="xrp">XRP-PERP-INTX</option>
-        <option value="doge">DOGE-PERP-INTX</option>
-        <option value="ada">ADA-PERP-INTX</option>
-        <option value="paxg">PAXG-PERP-INTX</option>
-        <option value="zec">ZEC-PERP-INTX</option>
-        <option value="xlm">XLM-PERP-INTX</option>
-        <option value="link">LINK-PERP-INTX</option>
-        <option value="sui">SUI-PERP-INTX</option>
-        <option value="aave">AAVE-PERP-INTX</option>
-      </select>
-    </div>
-
-    <div class="col-auto">
       <select class="form-select" id="granularityDropdown" onchange="onGranularityChange()">
         {% for g in granularities %}
           <option value="{{ g }}">{{ g }}</option>
@@ -99,7 +82,8 @@
                   <tr><th>Unrealized PnL</th><td id="acc_upnl">—</td></tr>
                   <tr><th>Leverage</th><td id="acc_lev">—</td></tr>
                   <tr><th>Contract Size</th><td id="acc_contract_size">—</td></tr>
-                  <tr><th>Pair</th><td id="acc_pair">—</td></tr>
+                  <tr><th>Product</th><td id="acc_pair">—</td></tr>
+                  <tr><th>Base</th><td id="acc_base">—</td></tr>
                   <tr><th>Granularity</th><td id="acc_gran">—</td></tr>
                 </tbody>
               </table>

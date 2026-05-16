@@ -10,23 +10,8 @@ let pricePollTimer = null;
 let idleBalanceTimer = null;
 let isRunning = false;
 let granularityLocked = false;
-let currentPair = 'btc';
+let currentProductId = '';
 let _stopping = false;
-
-const PRODUCT_SPECS = {
-  btc:  { label: 'BTC',  maxLev: 3.3,  contractSize: 0.01 },
-  eth:  { label: 'ETH',  maxLev: 3.0,  contractSize: 0.1 },
-  sol:  { label: 'SOL',  maxLev: 1.8,  contractSize: 5.0 },
-  xrp:  { label: 'XRP',  maxLev: 1.8,  contractSize: 500.0 },
-  doge: { label: 'DOGE', maxLev: 1.1,  contractSize: 5000.0 },
-  ada:  { label: 'ADA',  maxLev: 2.4,  contractSize: 1000.0 },
-  paxg: { label: 'PAXG', maxLev: 12.1, contractSize: 1.0 },
-  zec:  { label: 'ZEC',  maxLev: 2.0,  contractSize: 1.0 },
-  xlm:  { label: 'XLM',  maxLev: 2.6,  contractSize: 5000.0 },
-  link: { label: 'LINK', maxLev: 2.3,  contractSize: 50.0 },
-  sui:  { label: 'SUI',  maxLev: 1.8,  contractSize: 500.0 },
-  aave: { label: 'AAVE', maxLev: 1.5,  contractSize: 5.0 },
-};
 
 // ------------------------------------------------------------------ chart init
 
@@ -57,25 +42,7 @@ chart.subscribeCrosshairMove(param => {
   }
 });
 
-// ------------------------------------------------------------------ script / product / granularity dropdowns
-
-function syncProductDropdown(pair) {
-  const pdrop = document.getElementById('productDropdown');
-  for (const opt of pdrop.options) {
-    if (opt.value === (pair || '').toLowerCase()) { opt.selected = true; return; }
-  }
-}
-
-function updateProductPanel() {
-  if (isRunning) return;
-  const specs = PRODUCT_SPECS[currentPair];
-  if (!specs) return;
-  document.getElementById('acc_pair').textContent = specs.label + '-PERP-INTX';
-  document.getElementById('acc_lev').textContent  = specs.maxLev + 'x';
-  document.getElementById('acc_contract_size').textContent = specs.contractSize + ' ' + specs.label;
-  document.getElementById('acc_gran').textContent =
-    document.getElementById('granularityDropdown').value || '—';
-}
+// ------------------------------------------------------------------ script / granularity selection
 
 async function onScriptChange() {
   if (granularityLocked) return;
@@ -84,25 +51,19 @@ async function onScriptChange() {
   localStorage.setItem('selectedScriptId', scriptid);
   try {
     const resp = await fetch(`/api/live/scriptgranularity?scriptid=${scriptid}`);
-    if (resp.ok) {
-      const data = await resp.json();
-      currentPair = data.pair || 'btc';
-      syncProductDropdown(currentPair);
-      const drop = document.getElementById('granularityDropdown');
-      for (const opt of drop.options) {
-        if (opt.value === data.granularity) { opt.selected = true; break; }
-      }
-      updateProductPanel();
-      loadCandles();
+    if (!resp.ok) return;
+    const data = await resp.json();
+    currentProductId = data.product_id || '';
+    const drop = document.getElementById('granularityDropdown');
+    for (const opt of drop.options) {
+      if (opt.value === data.granularity) { opt.selected = true; break; }
     }
+    document.getElementById('acc_gran').textContent =
+      document.getElementById('granularityDropdown').value || '—';
+    document.getElementById('acc_pair').textContent = currentProductId || '—';
+    if (!isRunning) await refreshAccountForProduct(currentProductId);
+    loadCandles();
   } catch(e) {}
-}
-
-function onProductChange() {
-  if (isRunning) return;
-  currentPair = document.getElementById('productDropdown').value;
-  updateProductPanel();
-  loadCandles();
 }
 
 function onGranularityChange() {
@@ -152,7 +113,6 @@ function setRunningUI(running) {
   document.getElementById('bstart').classList.toggle('d-none', running);
   document.getElementById('bstop').classList.toggle('d-none', !running);
   document.getElementById('scriptDropdown').disabled = running;
-  document.getElementById('productDropdown').disabled = running;
   document.getElementById('granularityDropdown').disabled = running;
   const badge = document.getElementById('statusbadge');
   badge.textContent = running ? 'Running' : 'Stopped';
@@ -187,10 +147,10 @@ function startPolling() {
 function stopPolling() {
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
   if (pricePollTimer) { clearInterval(pricePollTimer); pricePollTimer = null; }
-  // Resume idle balance polling now that the bot isn't running
+  // Resume idle account polling now that the bot isn't running.
   if (idleBalanceTimer) clearInterval(idleBalanceTimer);
-  refreshIdleBalance();
-  idleBalanceTimer = setInterval(refreshIdleBalance, 15000);
+  refreshAccountForProduct(currentProductId);
+  idleBalanceTimer = setInterval(() => refreshAccountForProduct(currentProductId), 15000);
 }
 
 async function pollStatus() {
@@ -212,19 +172,36 @@ async function pollStatus() {
   } catch(e) {}
 }
 
-async function refreshIdleBalance() {
+async function refreshAccountForProduct(productId) {
+  // Pull a fresh snapshot for a specific product directly from Coinbase.
+  // Used on page load, on script change, and on the idle polling timer.
   if (isRunning) return;
+  if (!productId) return;
   try {
-    const balResp = await fetch('/api/live/balance');
-    if (!balResp.ok) return;
-    const bal = await balResp.json();
-    document.getElementById('acc_usd').textContent    = '$' + fmt(bal.usd);
-    document.getElementById('acc_equity').textContent = '$' + fmt(bal.total_equity);
+    const resp = await fetch('/api/live/account?product_id=' + encodeURIComponent(productId));
+    if (!resp.ok) return;
+    const data = await resp.json();
+    const baseSym = (data.base_currency || '').toUpperCase();
+    document.getElementById('acc_usd').textContent    = '$' + fmt(data.usd);
+    document.getElementById('acc_equity').textContent = '$' + fmt(data.total_equity);
+    const pos = data.realposition;
+    const posEl = document.getElementById('acc_pos');
+    posEl.textContent = fmt(pos, 6);
+    posEl.style.color = pos > 0 ? '#26a69a' : pos < 0 ? '#ef5350' : '';
+    document.getElementById('acc_cb').textContent    = pos ? '$' + fmt(data.costbasis) : '—';
+    document.getElementById('acc_price').textContent = data.mark_price ? '$' + fmt(data.mark_price) : '—';
     const pnlEl = document.getElementById('acc_upnl');
-    pnlEl.textContent = (bal.unrealized_pnl >= 0 ? '+' : '') + '$' + fmt(bal.unrealized_pnl);
-    pnlEl.style.color = bal.unrealized_pnl >= 0 ? '#26a69a' : '#ef5350';
+    pnlEl.textContent = (data.unrealized_pnl >= 0 ? '+' : '') + '$' + fmt(data.unrealized_pnl);
+    pnlEl.style.color = data.unrealized_pnl >= 0 ? '#26a69a' : '#ef5350';
+    if (data.max_leverage) {
+      document.getElementById('acc_lev').textContent = data.max_leverage + 'x';
+    }
+    document.getElementById('acc_contract_size').textContent =
+      data.contract_size != null ? data.contract_size + (baseSym ? ' ' + baseSym : '') : '—';
+    document.getElementById('acc_pair').textContent = data.product_id || productId;
+    document.getElementById('acc_base').textContent = baseSym || '—';
     document.getElementById('lastupdate').textContent =
-      'Balance updated ' + new Date().toLocaleTimeString();
+      'Account updated ' + new Date().toLocaleTimeString();
   } catch(e) {}
 }
 
@@ -261,10 +238,15 @@ function updateAccountPanel(data) {
   pnlEl.textContent = (data.unrealized_pnl >= 0 ? '+' : '') + '$' + fmt(data.unrealized_pnl);
   pnlEl.style.color = data.unrealized_pnl >= 0 ? '#26a69a' : '#ef5350';
   document.getElementById('acc_lev').textContent  = data.leverage + 'x';
-  const pairBase = (data.pair || '').toUpperCase();
+  // data.pair holds the trading Product_ID from the script (e.g.
+  // BIP-20DEC30-CDE). Base symbol comes from the account snapshot, not
+  // the product_id string (which has no reliable base prefix for CDE).
+  const productId = data.pair || '—';
+  const baseSym = (data.base_currency || '').toUpperCase();
   document.getElementById('acc_contract_size').textContent =
-    data.contract_size ? data.contract_size + ' ' + pairBase : '—';
-  document.getElementById('acc_pair').textContent = pairBase + '-PERP-INTX';
+    data.contract_size != null ? data.contract_size + (baseSym ? ' ' + baseSym : '') : '—';
+  document.getElementById('acc_pair').textContent = productId;
+  document.getElementById('acc_base').textContent = baseSym || '—';
   document.getElementById('acc_gran').textContent = data.granularity || '—';
 
   if (data.log && data.log.length) {
@@ -281,7 +263,11 @@ let lastTickTime = null;
 async function loadCandles(fitView = true) {
   try {
     const gran = document.getElementById('granularityDropdown').value;
-    const params = isRunning ? '' : `?pair=${encodeURIComponent(currentPair)}&granularity=${encodeURIComponent(gran)}`;
+    let params = '';
+    if (!isRunning) {
+      if (!currentProductId) return;  // no script selected → nothing to chart
+      params = `?product_id=${encodeURIComponent(currentProductId)}&granularity=${encodeURIComponent(gran)}`;
+    }
     const resp = await fetch('/api/live/candles' + params);
     if (!resp.ok) return;
     const data = await resp.json();
@@ -635,7 +621,7 @@ async function refreshOpenOrdersModal() {
             if (parseInt(opt.value) === data.scriptid) { opt.selected = true; break; }
           }
         }
-        if (data.pair) syncProductDropdown(data.pair);
+        if (data.pair) currentProductId = data.pair;
         if (data.granularity) {
           const gdrop = document.getElementById('granularityDropdown');
           for (const opt of gdrop.options) {
@@ -646,16 +632,15 @@ async function refreshOpenOrdersModal() {
     }
   } catch(e) {}
 
-  if (!isRunning) {
-    updateProductPanel();
-    refreshIdleBalance();
-    if (idleBalanceTimer) clearInterval(idleBalanceTimer);
-    idleBalanceTimer = setInterval(refreshIdleBalance, 15000);
-  }
-
-  // Fetch pair/granularity from selected script, then load chart
+  // Fetch product_id/granularity from selected script, then load the
+  // per-product account snapshot + chart.
   await onScriptChange();
-  if (!isRunning) loadCandles();
+  if (!isRunning && currentProductId) {
+    await refreshAccountForProduct(currentProductId);
+    if (idleBalanceTimer) clearInterval(idleBalanceTimer);
+    idleBalanceTimer = setInterval(() => refreshAccountForProduct(currentProductId), 15000);
+    loadCandles();
+  }
 
   // Open-orders badge: refresh on load and every 30s
   refreshOpenOrdersCount();
