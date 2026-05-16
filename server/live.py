@@ -35,6 +35,7 @@ class LiveTrader:
         self._min_base_size = None
         self._base_increment = None
         self._contract_size = None
+        self._product_venue = None  # 'FCM'/'CDE' (base_size = contract count) vs 'INTX' (base_size = base asset qty)
 
     # ------------------------------------------------------------------ startup
 
@@ -106,14 +107,25 @@ class LiveTrader:
             self.running = False
             return
 
-        self.pair = self.namespace.get('pair', 'btc')
+        product_id = (self.namespace.get('Product_ID') or '').strip()
+        if not product_id:
+            # Legacy fallback: scripts still using pair="btc"
+            legacy = self.namespace.get('pair')
+            if legacy:
+                product_id = legacy.upper() + '-PERP-INTX'
+        self.pair = product_id  # kept for downstream code that referenced self.pair
         self.granularity = self.namespace.get('granularity', 'ONE_HOUR')
-        product_id = self.pair.upper() + '-PERP-INTX'
         gran_secs = GRAN_SECONDS.get(self.granularity, 3600)
 
-        lutil.setkeyval('live_pair', self.pair)
+        if not product_id:
+            self._livelog("Product_ID not set in script — stopping. "
+                          "Set Product_ID='BIP-20DEC30-CDE' or similar (use 'Browse Products' on the backtest page).")
+            self.running = False
+            return
+
+        lutil.setkeyval('live_pair', product_id)
         lutil.setkeyval('live_granularity', self.granularity)
-        self._livelog(f"Pair: {product_id} | Granularity: {self.granularity}")
+        self._livelog(f"Product_ID: {product_id} | Granularity: {self.granularity}")
 
         # Read account data first so the UI is populated immediately
         self._load_product_limits(product_id)
@@ -530,7 +542,7 @@ class LiveTrader:
                 # Step 2: place replacement order
                 try:
                     new_cb_id = str(uuid.uuid4())
-                    base_size = str(self._round_to_increment(float(row['amount'])))
+                    base_size = self._format_base_size(self._round_to_increment(float(row['amount'])))
                     pos = self.namespace.get('realposition', 0)
                     if new_stop > 0:
                         limit_price_for_stop = round(new_stop * (0.999 if pos > 0 else 1.001), 2)
@@ -575,17 +587,27 @@ class LiveTrader:
         cb = CoinbaseHTTP()
         try:
             product = cb.get_product(product_id)
+            # Refresh the cache row from this same fetch so the rest of the app sees fresh data.
+            try:
+                if isinstance(product, dict) and product.get('product_id'):
+                    lutil.upsert_futures_product(product)
+            except Exception:
+                pass
+
             self._max_base_size = float(product.get('base_max_size') or 0) or None
             self._min_base_size = float(product.get('base_min_size') or 0) or None
             self._base_increment = float(product.get('base_increment') or 0) or None
+            self._product_venue = (product.get('product_venue') or '').upper()
 
             future_details = product.get('future_product_details') or {}
             api_contract_size = float(future_details.get('contract_size') or 0)
             perp_details = future_details.get('perpetual_details') or {}
             max_leverage = float(perp_details.get('max_leverage') or 0)
 
+            # INTX: API's contract_size field is unreliable post-merger — use hardcoded specs.
+            # FCM/CDE: API's contract_size is correct (e.g. 0.01 BTC for BIP-20DEC30-CDE).
             known = KNOWN_CONTRACT_SIZES.get(product_id)
-            if known is not None:
+            if self._product_venue == 'INTX' and known is not None:
                 self._contract_size = known
                 if known != api_contract_size:
                     self._livelog(
@@ -593,27 +615,40 @@ class LiveTrader:
                         f"using hardcoded {known} for {product_id}"
                     )
             else:
-                self._contract_size = api_contract_size if api_contract_size > 0 else None
+                self._contract_size = api_contract_size if api_contract_size > 0 else (known or None)
 
             self._livelog(
-                f"Product limits — min:{self._min_base_size} max:{self._max_base_size} "
-                f"increment:{self._base_increment} | contract_size:{self._contract_size} "
-                f"max_leverage:{max_leverage}x"
+                f"Product limits — venue:{self._product_venue} min:{self._min_base_size} "
+                f"max:{self._max_base_size} increment:{self._base_increment} | "
+                f"contract_size:{self._contract_size} max_leverage:{max_leverage}x"
             )
         except Exception:
             self._livelog(f"Could not load product limits:\n{traceback.format_exc()}")
 
     def _round_to_increment(self, size: float) -> float:
-        # Perp products on Coinbase only accept whole-contract base_size — i.e. a
-        # multiple of contract_size (e.g. 0.01 BTC for BTC-PERP-INTX), not the
-        # looser base_increment (0.0001). Round to whichever is larger so the
-        # request matches what the venue actually accepts.
-        inc = max(getattr(self, '_base_increment', 0) or 0,
-                  getattr(self, '_contract_size', 0) or 0)
-        if not inc or inc <= 0:
+        """Round a base-asset (BTC) quantity DOWN to the nearest whole contract.
+        Whole-contract granularity = contract_size, regardless of venue (the base_size
+        on the wire differs by venue but the underlying-asset granularity is the same)."""
+        cs = self._contract_size or 0
+        if cs <= 0:
             return round(size, 8)
-        factor = round(1 / inc)
-        return math.floor(size * factor) / factor
+        factor = round(1 / cs)
+        contracts = math.floor(abs(size) * factor)
+        return math.copysign(contracts / factor, size) if size else 0.0
+
+    def _format_base_size(self, btc_qty: float) -> str:
+        """Convert a (signed) base-asset quantity into the venue-correct base_size string.
+        - FCM/CDE: base_size is integer CONTRACT COUNT (1, 2, 3 ...)
+        - INTX:    base_size is BASE-ASSET amount (e.g. '0.01' BTC = 1 contract)
+        Caller is responsible for sign; this returns a non-negative string.
+        """
+        cs = self._contract_size or 0.01
+        qty = abs(btc_qty)
+        if (self._product_venue or '').upper() in ('FCM', 'CDE'):
+            contracts = int(round(qty / cs)) if cs > 0 else int(qty)
+            return str(contracts)
+        # INTX (or unknown): wire format is base-asset amount
+        return str(round(qty, 8))
 
     def _cb_create_order(self, cb, client_order_id, product_id, side, order_configuration):
         """All perp orders go through here so leverage + margin_type are always
@@ -755,7 +790,7 @@ class LiveTrader:
                 if close_qty <= 0:
                     self._livelog(f"Exit skipped — close_qty {close_qty} below whole-contract granularity")
                     return
-                base_size = str(close_qty)
+                base_size = self._format_base_size(close_qty)
                 if limitprice > 0:
                     side = 'SELL' if pos > 0 else 'BUY'
                     intent = f"EXIT limit {'sell' if pos>0 else 'buy'} {base_size} @ {limitprice}"
@@ -778,7 +813,7 @@ class LiveTrader:
             elif tradetype == util.TradeType.Buy:
                 if realposition < 0:
                     close_id = str(uuid.uuid4())
-                    base_size = str(self._round_to_increment(abs(realposition)))
+                    base_size = self._format_base_size(self._round_to_increment(abs(realposition)))
                     intent = f"BUY: close short {base_size} at market"
                     resp = self._cb_create_order(cb, close_id, product_id, 'BUY', {
                         'market_market_ioc': {'base_size': base_size}
@@ -790,7 +825,7 @@ class LiveTrader:
                 if limitprice > 0:
                     bs = self._cap_base_size(round(amount_notional / limitprice, 8))
                     if bs <= 0: return
-                    base_size = str(bs)
+                    base_size = self._format_base_size(bs)
                     intent = f"BUY limit {base_size} @ {limitprice}"
                     resp = self._cb_create_order(cb, order_id, product_id, 'BUY', {
                         'limit_limit_gtc': {'base_size': base_size, 'limit_price': str(round(limitprice, 2))}
@@ -801,7 +836,7 @@ class LiveTrader:
                 elif stopprice > 0:
                     bs = self._cap_base_size(round(amount_notional / stopprice, 8))
                     if bs <= 0: return
-                    base_size = str(bs)
+                    base_size = self._format_base_size(bs)
                     intent = f"BUY stop {base_size} @ {stopprice}"
                     resp = self._cb_create_order(cb, order_id, product_id, 'BUY', {
                         'stop_limit_stop_limit_gtc': {
@@ -817,7 +852,7 @@ class LiveTrader:
                 else:
                     bs = self._cap_base_size(round(amount_notional / close_price, 8))
                     if bs <= 0: return
-                    base_size = str(bs)
+                    base_size = self._format_base_size(bs)
                     intent = f"BUY market {base_size} contracts"
                     resp = self._cb_create_order(cb, order_id, product_id, 'BUY', {
                         'market_market_ioc': {'base_size': base_size}
@@ -829,7 +864,7 @@ class LiveTrader:
             elif tradetype == util.TradeType.Sell:
                 if realposition > 0:
                     close_id = str(uuid.uuid4())
-                    base_size = str(self._round_to_increment(realposition))
+                    base_size = self._format_base_size(self._round_to_increment(realposition))
                     intent = f"SELL: close long {base_size} at market"
                     resp = self._cb_create_order(cb, close_id, product_id, 'SELL', {
                         'market_market_ioc': {'base_size': base_size}
@@ -841,7 +876,7 @@ class LiveTrader:
                 if limitprice > 0:
                     bs = self._cap_base_size(round(amount_notional / limitprice, 8))
                     if bs <= 0: return
-                    base_size = str(bs)
+                    base_size = self._format_base_size(bs)
                     intent = f"SELL limit {base_size} @ {limitprice}"
                     resp = self._cb_create_order(cb, order_id, product_id, 'SELL', {
                         'limit_limit_gtc': {'base_size': base_size, 'limit_price': str(round(limitprice, 2))}
@@ -852,7 +887,7 @@ class LiveTrader:
                 elif stopprice > 0:
                     bs = self._cap_base_size(round(amount_notional / stopprice, 8))
                     if bs <= 0: return
-                    base_size = str(bs)
+                    base_size = self._format_base_size(bs)
                     intent = f"SELL stop {base_size} @ {stopprice}"
                     resp = self._cb_create_order(cb, order_id, product_id, 'SELL', {
                         'stop_limit_stop_limit_gtc': {
@@ -868,7 +903,7 @@ class LiveTrader:
                 else:
                     bs = self._cap_base_size(round(amount_notional / close_price, 8))
                     if bs <= 0: return
-                    base_size = str(bs)
+                    base_size = self._format_base_size(bs)
                     intent = f"SELL market {base_size} contracts"
                     resp = self._cb_create_order(cb, order_id, product_id, 'SELL', {
                         'market_market_ioc': {'base_size': base_size}

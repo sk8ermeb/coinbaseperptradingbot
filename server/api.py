@@ -74,7 +74,13 @@ async def fetchsim(session: str = Depends(require_session),
     if(len(simidres) < 1):
         raise HTTPException(status_code=400, detail="bad request")
     simidres = simidres[0]
-    pair = simidres['pair'].upper()+'-PERP-INTX'
+    # `pair` column now stores the full historical product_id (e.g. 'BTC-PERP-INTX').
+    # Legacy rows held only the short code like 'btc' — auto-expand those.
+    raw = (simidres['pair'] or '').strip()
+    if raw and '-' not in raw:
+        pair = raw.upper() + '-PERP-INTX'
+    else:
+        pair = raw
     candles = autil.gethistoricledata(simidres['granularity'], pair, simidres['start'], simidres['stop'])
     simevents = autil.runselect("SELECT * FROM simevent WHERE exchangesimid=?", (simid,))
     #i = 0
@@ -311,7 +317,9 @@ async def live_candles(session: str = Depends(require_session),
         use_pair = pair or autil.getkeyval('live_pair') or 'btc'
         use_gran = granularity or autil.getkeyval('live_granularity') or 'ONE_HOUR'
 
-    product_id = use_pair.upper() + '-PERP-INTX'
+    # live_pair now stores the full product_id (e.g. 'BIP-20DEC30-CDE'). Legacy
+    # rows held only the short code 'btc' — auto-expand those for backwards compat.
+    product_id = use_pair if (use_pair and '-' in use_pair) else (use_pair.upper() + '-PERP-INTX')
     gran_secs = live_module.GRAN_SECONDS.get(use_gran, 3600)
     import time as _time
     now = int(_time.time())
@@ -375,7 +383,7 @@ async def live_price(session: str = Depends(require_session)):
     from coinbase_http import CoinbaseHTTP
     trader = live_module.get_trader()
     use_pair = (trader.pair if trader else None) or autil.getkeyval('live_pair') or 'btc'
-    product_id = use_pair.upper() + '-PERP-INTX'
+    product_id = use_pair if (use_pair and '-' in use_pair) else (use_pair.upper() + '-PERP-INTX')
     try:
         cb = CoinbaseHTTP()
         product = cb.get_product(product_id)
@@ -527,11 +535,75 @@ async def live_script_granularity(session: str = Depends(require_session),
     scripts = autil.runselect("SELECT script FROM scripts WHERE id=?", (scriptid,))
     if not scripts:
         raise HTTPException(status_code=404, detail="Script not found")
-    # Quick parse: look for granularity = "..." assignment
     import re
     match = re.search(r'granularity\s*=\s*["\'](\w+)["\']', scripts[0]['script'])
     granularity = match.group(1) if match else 'ONE_HOUR'
-    match_pair = re.search(r'pair\s*=\s*["\'](\w+)["\']', scripts[0]['script'])
-    pair = match_pair.group(1) if match_pair else 'btc'
-    return JSONResponse({'granularity': granularity, 'pair': pair})
+    # Prefer Product_ID (new), fall back to legacy pair= for older scripts.
+    match_pid = re.search(r'Product_ID\s*=\s*["\']([^"\']+)["\']', scripts[0]['script'])
+    if match_pid:
+        product_id = match_pid.group(1)
+    else:
+        match_pair = re.search(r'pair\s*=\s*["\'](\w+)["\']', scripts[0]['script'])
+        product_id = (match_pair.group(1).upper() + '-PERP-INTX') if match_pair else 'BTC-PERP-INTX'
+    return JSONResponse({'granularity': granularity, 'product_id': product_id})
+
+
+# ============================== Futures product discovery ==============================
+
+@router.post("/futures/refresh")
+async def futures_refresh(session: str = Depends(require_session)):
+    """Enumerate FUTURE products visible to the configured key, upsert into the local
+    cache. Returns counts so the UI can show 'Loaded N products (M tradeable)'."""
+    from coinbase_http import CoinbaseHTTP
+    cb = CoinbaseHTTP()
+    autil.clear_futures_products()
+    total = 0
+    tradeable = 0
+    cursor = None
+    try:
+        while True:
+            data = cb.list_products(product_type='FUTURE', cursor=cursor)
+            products = data.get('products') or []
+            for p in products:
+                total += 1
+                autil.upsert_futures_product(p)
+                fd = p.get('future_product_details') or {}
+                region = fd.get('region_enabled') or {}
+                if not p.get('view_only') and region.get('US'):
+                    tradeable += 1
+            pagination = data.get('pagination') or {}
+            cursor = pagination.get('next_cursor') or data.get('cursor')
+            if not cursor or not products:
+                break
+    except Exception as e:
+        return JSONResponse({'error': str(e), 'total': total, 'tradeable': tradeable},
+                            status_code=200)
+    return JSONResponse({'total': total, 'tradeable': tradeable})
+
+
+@router.get("/futures/cryptos")
+async def futures_cryptos(session: str = Depends(require_session)):
+    """Distinct contract_root_units across tradeable products in the cache."""
+    return JSONResponse({'cryptos': autil.list_futures_cryptos()})
+
+
+@router.get("/futures/products")
+async def futures_products(session: str = Depends(require_session),
+                           root_unit: str = Query(...)):
+    """All tradeable products for one root unit (view_only==false, US enabled)."""
+    rows = autil.list_futures_products_by_root(root_unit.upper())
+    return JSONResponse({'products': rows})
+
+
+@router.get("/futures/product/{product_id}")
+async def futures_product_detail(product_id: str, session: str = Depends(require_session)):
+    """Fresh fetch of one product's full JSON; also refresh the cache row."""
+    from coinbase_http import CoinbaseHTTP
+    try:
+        data = CoinbaseHTTP().get_product(product_id)
+        if isinstance(data, dict) and data.get('product_id'):
+            autil.upsert_futures_product(data)
+        return JSONResponse(data)
+    except Exception as e:
+        return JSONResponse({'error': str(e)}, status_code=200)
 

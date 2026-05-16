@@ -228,16 +228,159 @@ async function handleScriptSave(){
 document.addEventListener('DOMContentLoaded', () => {
   const lastId = localStorage.getItem('selectedScriptId');
   const select = document.getElementById('myDropdown');
+  let scriptLoaded = false;
   if (lastId) {
     for (const opt of select.options) {
       if (opt.value === lastId) {
         opt.selected = true;
         handleScriptSelect(select);
-        return;
+        scriptLoaded = true;
+        break;
       }
     }
   }
-  window.editor.dispatch({
-    changes: { from: 0, to: window.editor.state.doc.length, insert: defscript }
-  });
+  if (!scriptLoaded) {
+    window.editor.dispatch({
+      changes: { from: 0, to: window.editor.state.doc.length, insert: defscript }
+    });
+  }
+  loadCryptoDropdown();
 });
+
+// ============================== Futures product discovery ==============================
+
+function _escFut(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
+async function loadCryptoDropdown() {
+  try {
+    const resp = await fetch('/api/futures/cryptos');
+    if (!resp.ok) return;
+    const data = await resp.json();
+    const sel = document.getElementById('cryptoDropdown');
+    if (!sel) return;
+    const prev = sel.value;
+    sel.innerHTML = '<option value="">— Browse Products —</option>';
+    for (const c of (data.cryptos || [])) {
+      const opt = document.createElement('option');
+      opt.value = c; opt.textContent = c;
+      sel.appendChild(opt);
+    }
+    sel.value = prev;
+    const status = document.getElementById('futuresStatus');
+    if (status) {
+      status.textContent = (data.cryptos && data.cryptos.length)
+        ? `${data.cryptos.length} cryptos cached`
+        : 'No products cached — click "Get Futures"';
+    }
+  } catch (e) { /* ignore */ }
+}
+
+async function refreshFutures() {
+  const btn = document.getElementById('bgetfutures');
+  const status = document.getElementById('futuresStatus');
+  if (btn) btn.disabled = true;
+  if (status) status.textContent = 'Fetching…';
+  try {
+    const resp = await fetch('/api/futures/refresh', { method: 'POST' });
+    const data = await resp.json();
+    if (data.error) {
+      if (status) status.textContent = 'Error: ' + data.error;
+    } else if (status) {
+      status.textContent = `Loaded ${data.total} products (${data.tradeable} tradeable)`;
+    }
+    await loadCryptoDropdown();
+  } catch (e) {
+    if (status) status.textContent = 'Request failed';
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function onCryptoChange() {
+  const sel = document.getElementById('cryptoDropdown');
+  const root = sel && sel.value;
+  if (!root) return;
+  await openFuturesListModal(root);
+  // Reset to placeholder so re-selecting the same crypto reopens the modal.
+  sel.value = '';
+}
+
+async function openFuturesListModal(rootUnit) {
+  const labelEl = document.getElementById('futuresListModalLabel');
+  if (labelEl) labelEl.textContent = `Tradeable ${rootUnit} Products`;
+  const content = document.getElementById('futuresListContent');
+  content.innerHTML = '<div class="text-center py-4"><div class="spinner-border spinner-border-sm"></div> Loading…</div>';
+  const modal = new bootstrap.Modal(document.getElementById('futuresListModal'));
+  modal.show();
+  try {
+    const resp = await fetch('/api/futures/products?root_unit=' + encodeURIComponent(rootUnit));
+    const data = await resp.json();
+    const rows = data.products || [];
+    if (!rows.length) {
+      content.innerHTML = '<div class="text-muted p-3">No tradeable products for this crypto.</div>';
+      return;
+    }
+    let html = '<table class="table table-sm table-hover mb-0"><thead><tr>'
+             + '<th>Product ID</th><th>Expiry</th><th class="text-end">Copy</th>'
+             + '</tr></thead><tbody>';
+    for (const r of rows) {
+      const pid = _escFut(r.product_id);
+      const expiry = _escFut(r.contract_expiry);
+      html += `<tr>
+        <td><a href="#" onclick="event.preventDefault(); openFuturesDetailModal('${pid}'); return false;">
+          <code>${pid}</code></a></td>
+        <td class="small">${expiry}</td>
+        <td class="text-end">
+          <button class="btn btn-sm btn-outline-secondary py-0 px-2"
+                  title="Copy product_id"
+                  onclick="copyProductId('${pid}', this)">
+            <i class="bi bi-clipboard"></i>
+          </button>
+        </td>
+      </tr>`;
+    }
+    html += '</tbody></table>';
+    content.innerHTML = html;
+  } catch (e) {
+    content.innerHTML = `<div class="alert alert-danger m-2">Failed to load: ${_escFut(String(e))}</div>`;
+  }
+}
+
+async function openFuturesDetailModal(productId) {
+  const labelEl = document.getElementById('futuresDetailModalLabel');
+  if (labelEl) labelEl.textContent = productId;
+  const pre = document.getElementById('futuresDetailContent');
+  pre.textContent = 'Loading…';
+  const modal = new bootstrap.Modal(document.getElementById('futuresDetailModal'));
+  modal.show();
+  try {
+    const resp = await fetch('/api/futures/product/' + encodeURIComponent(productId));
+    const data = await resp.json();
+    pre.textContent = JSON.stringify(data, null, 2);
+  } catch (e) {
+    pre.textContent = 'Error: ' + String(e);
+  }
+}
+
+function copyProductId(pid, btn) {
+  navigator.clipboard.writeText(pid).then(() => {
+    if (!btn) return;
+    const icon = btn.querySelector('i');
+    if (!icon) return;
+    const orig = icon.className;
+    icon.className = 'bi bi-clipboard-check';
+    btn.classList.add('btn-success');
+    btn.classList.remove('btn-outline-secondary');
+    setTimeout(() => {
+      icon.className = orig;
+      btn.classList.add('btn-outline-secondary');
+      btn.classList.remove('btn-success');
+    }, 900);
+  }).catch(() => {
+    alert('Copy failed — manually copy: ' + pid);
+  });
+}

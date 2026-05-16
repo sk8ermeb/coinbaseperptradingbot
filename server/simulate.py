@@ -32,7 +32,8 @@ class Simulation:
         self.namespace['TradeType'] = util.TradeType
         self.namespace['TradeOrder'] = util.TradeOrder
         self.namespace['granularity'] = "ONE_HOUR"
-        self.namespace['pair'] = "btc"
+        self.namespace['Product_ID'] = ""           # required: e.g. "BIP-20DEC30-CDE"
+        self.namespace['backtest_product_id'] = ""  # optional override for INTX candles
         self.namespace['N'] = 0
         self.namespace['opens'] = []
         self.namespace['closes'] = []
@@ -67,24 +68,82 @@ class Simulation:
         except Exception as e:
             error = traceback.format_exc()
             self.good = False
-        if('pair' in self.namespace):
-            self.pair = self.namespace['pair']
         if('granularity' in self.namespace):
             self.granularity = self.namespace['granularity']
-        historicalpair = self.pair.upper()+'-PERP-INTX'
 
-        from coinbase_http import KNOWN_CONTRACT_SIZES, KNOWN_MAX_LEVERAGES
+        # Resolve Product_ID (user's live/sim product) and historical product (INTX candles)
+        product_id = (self.namespace.get('Product_ID') or '').strip()
+        override_hist = (self.namespace.get('backtest_product_id') or '').strip()
+        self.pair = product_id  # kept on self for downstream code that referenced .pair
+        self._product_id = product_id
+        cb = CoinbaseHTTP()
+
+        from coinbase_http import KNOWN_CONTRACT_SIZES
+
+        # Defaults (overridden below from cache/API)
+        self._base_increment = 1.0
+        self._base_min_size = 1.0
+        self._contract_size = 0.01
+        self._product_venue = ''
+        historicalpair = ''
+
+        if self.good and not product_id:
+            error = ("Product_ID is not set. In your script, set e.g.\n"
+                     "    Product_ID = 'BIP-20DEC30-CDE'\n"
+                     "Use the 'Browse Products' dropdown on the backtest page to find valid IDs.")
+            self.good = False
+
         if self.good:
-            if historicalpair not in KNOWN_CONTRACT_SIZES:
-                supported = ', '.join(KNOWN_CONTRACT_SIZES.keys())
-                error = f"Unsupported product '{historicalpair}'.\nSupported products: {supported}"
+            # 1. Resolve the product itself — cache, then fall back to live fetch.
+            row = sutil.get_futures_product(product_id)
+            if row is None:
+                try:
+                    fresh = cb.get_product(product_id)
+                    if isinstance(fresh, dict) and fresh.get('product_id'):
+                        sutil.upsert_futures_product(fresh)
+                        row = sutil.get_futures_product(product_id)
+                except Exception:
+                    row = None
+            if row is None:
+                error = (f"Product '{product_id}' not found via Coinbase. "
+                         f"Click 'Get Futures' on the backtest page to refresh the cache, "
+                         f"then pick a valid Product_ID.")
                 self.good = False
             else:
-                leverage = self.namespace.get('leverage', 10)
-                max_lev = KNOWN_MAX_LEVERAGES[historicalpair]
-                if leverage > max_lev:
-                    error = f"Leverage {leverage}x exceeds the maximum of {max_lev}x for {historicalpair}."
+                root = row.get('contract_root_unit') or ''
+                self._product_venue = row.get('product_venue') or ''
+                try:
+                    if row.get('contract_size'): self._contract_size = float(row['contract_size'])
+                    if row.get('base_increment'): self._base_increment = float(row['base_increment'])
+                    if row.get('base_min_size'):  self._base_min_size = float(row['base_min_size'])
+                except (TypeError, ValueError):
+                    pass
+
+                # 2. Pick historical source: override > {ROOT}-PERP-INTX > error
+                if override_hist:
+                    historicalpair = override_hist
+                elif root:
+                    historicalpair = f"{root.upper()}-PERP-INTX"
+                else:
+                    error = (f"Product '{product_id}' has no contract_root_unit on file. "
+                             f"Set backtest_product_id='<some product>' in your script to override.")
                     self.good = False
+
+        if self.good and historicalpair:
+            # 3. Sanity-check the historical product is reachable.
+            try:
+                _h = cb.get_product(historicalpair)
+                if not isinstance(_h, dict) or not _h.get('product_id'):
+                    raise Exception('not found')
+            except Exception:
+                error = (f"Cannot fetch historical candles for '{historicalpair}' "
+                         f"(derived from Product_ID '{product_id}'). "
+                         f"Set backtest_product_id='<some other product>' in your script to override.")
+                self.good = False
+
+        # INTX known-spec fallback (API contract_size for INTX is wrong post-merger)
+        if self.good and historicalpair in KNOWN_CONTRACT_SIZES and self._product_venue.upper() == 'INTX':
+            self._contract_size = KNOWN_CONTRACT_SIZES[historicalpair]
 
         if self.good:
             self.simcandles = sutil.gethistoricledata(self.granularity, historicalpair, self.start, self.stop)
@@ -92,40 +151,25 @@ class Simulation:
             self.simcandles = []
         self.cancelled = False
         self.simid = sutil.runinsert("INSERT INTO exchangesim (log, granularity, pair, start, stop, scriptid, runat, currenttick, totalticks) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                                     ("", self.granularity, self.pair, start, stop, scriptid, int(time.time()), 0, len(self.simcandles)))
+                                     ("", self.granularity, historicalpair or product_id, start, stop, scriptid, int(time.time()), 0, len(self.simcandles)))
         sutil.setkeyval('simid', self.simid)
         sutil.setkeyval(f'sim_{self.simid}_leverage', str(self.namespace['leverage']))
-
-        # Fetch product details for accurate contract sizing
-        self._base_increment = 0.0001  # fallback
-        self._contract_size = KNOWN_CONTRACT_SIZES.get(historicalpair, 0.01)  # fallback 0.01
-        try:
-            cb = CoinbaseHTTP()
-            product = cb.get_product(historicalpair)
-            inc = float(product.get('base_increment') or 0)
-            if inc > 0:
-                self._base_increment = inc
-            # Prefer hardcoded known value over API (API returns wrong values post-merger)
-            known = KNOWN_CONTRACT_SIZES.get(historicalpair)
-            if known is None:
-                fd = product.get('future_product_details') or {}
-                cs = float(fd.get('contract_size') or 0)
-                if cs > 0:
-                    self._contract_size = cs
-            sutil.setkeyval(f'sim_{self.simid}_contract_size', str(self._contract_size))
-            sutil.setkeyval(f'sim_{self.simid}_base_increment', str(self._base_increment))
-        except Exception:
-            sutil.setkeyval(f'sim_{self.simid}_contract_size', str(self._contract_size))
+        sutil.setkeyval(f'sim_{self.simid}_contract_size', str(self._contract_size))
+        sutil.setkeyval(f'sim_{self.simid}_base_increment', str(self._base_increment))
+        sutil.setkeyval(f'sim_{self.simid}_product_id', product_id)
+        sutil.setkeyval(f'sim_{self.simid}_historical_product_id', historicalpair)
 
         if(not self.good):
             sutil.runupdate("UPDATE exchangesim SET log=?, status=? WHERE id=?", (error, -1, self.simid))
         sutil.SimID = self.simid
         sutil.TickTime = "init"
-        sutil.simlog(
-            f"Sim started — pair:{historicalpair} granularity:{self.granularity} "
-            f"USD:{self.namespace['usd']:.2f} leverage:{self.namespace['leverage']}x "
-            f"contract_size:{self._contract_size} increment:{self._base_increment}"
-        )
+        if self.good:
+            sutil.simlog(
+                f"Sim started — Product_ID:{product_id} historical:{historicalpair} "
+                f"granularity:{self.granularity} USD:{self.namespace['usd']:.2f} "
+                f"leverage:{self.namespace['leverage']}x contract_size:{self._contract_size} "
+                f"base_increment:{self._base_increment}"
+            )
 
         self._SimUSDStart = self.namespace['usd']
         self._SimUSDEnd = self.namespace['usd']

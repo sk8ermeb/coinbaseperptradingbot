@@ -195,6 +195,21 @@ class util:
                 eventdata TEXT,
                 time INTEGER
             )""")
+            cur.execute("""CREATE TABLE IF NOT EXISTS futures_products (
+                product_id TEXT PRIMARY KEY,
+                contract_root_unit TEXT,
+                contract_size TEXT,
+                base_min_size TEXT,
+                base_increment TEXT,
+                contract_expiry TEXT,
+                contract_expiry_type TEXT,
+                product_venue TEXT,
+                quote_currency_id TEXT,
+                display_name TEXT,
+                view_only INTEGER,
+                us_enabled INTEGER,
+                updated_at INTEGER
+            )""")
             cur.execute("""CREATE TABLE IF NOT EXISTS liveorder (
                 id INTEGER PRIMARY KEY,
                 scriptid INTEGER,
@@ -364,6 +379,65 @@ class util:
             print("FAILED TO UPATE SIM LOG(NO SIM ID)")
             return False
         return True
+
+    # ------------------------------------------------------------------ futures product cache
+
+    def upsert_futures_product(self, product: dict) -> bool:
+        """Insert or replace one row in futures_products from a Coinbase product dict."""
+        fd = product.get('future_product_details') or {}
+        region = fd.get('region_enabled') or {}
+        import time as _time
+        params = (
+            product.get('product_id'),
+            fd.get('contract_root_unit') or '',
+            fd.get('contract_size') or '',
+            product.get('base_min_size') or '',
+            product.get('base_increment') or '',
+            fd.get('contract_expiry') or '',
+            fd.get('contract_expiry_type') or '',
+            product.get('product_venue') or '',
+            product.get('quote_currency_id') or '',
+            fd.get('display_name') or product.get('display_name') or '',
+            1 if product.get('view_only') else 0,
+            1 if region.get('US') else 0,
+            int(_time.time()),
+        )
+        succ = self.runupdate(
+            """INSERT OR REPLACE INTO futures_products
+               (product_id, contract_root_unit, contract_size, base_min_size, base_increment,
+                contract_expiry, contract_expiry_type, product_venue, quote_currency_id,
+                display_name, view_only, us_enabled, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            params,
+        )
+        return succ >= 0
+
+    def get_futures_product(self, product_id: str) -> dict:
+        rows = self.runselect("SELECT * FROM futures_products WHERE product_id=?", (product_id,))
+        return rows[0] if rows else None
+
+    def list_futures_cryptos(self) -> list:
+        """Return sorted distinct contract_root_unit values for tradeable products
+        (view_only==false AND us_enabled==true)."""
+        rows = self.runselect(
+            """SELECT DISTINCT contract_root_unit FROM futures_products
+               WHERE view_only=0 AND us_enabled=1 AND contract_root_unit<>''
+               ORDER BY contract_root_unit""",
+            (),
+        )
+        return [r['contract_root_unit'] for r in rows]
+
+    def list_futures_products_by_root(self, root_unit: str) -> list:
+        """Tradeable products for a given root unit (filtered, sorted by expiry)."""
+        return self.runselect(
+            """SELECT * FROM futures_products
+               WHERE contract_root_unit=? AND view_only=0 AND us_enabled=1
+               ORDER BY contract_expiry""",
+            (root_unit,),
+        )
+
+    def clear_futures_products(self) -> int:
+        return self.runupdate("DELETE FROM futures_products", ())
 
 
 

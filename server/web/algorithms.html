@@ -3,6 +3,7 @@
 {% block title %}Algorithms{% endblock %}
 
 {% block content %}
+<link href="/static/bootstrap-5.3.8-dist/css/bootstrap-icons.css" rel="stylesheet">
 <div class="container-fluid">
   <div class="row align-items-center g-3 flex-sm-wrap">
     <div class="col-auto">
@@ -20,7 +21,19 @@
     <div class="col">
       <button type="button" id="delbtn" class="btn d-none btn-danger" onclick="confirmDelete()">Delete Script</button>
     </div>
-    
+
+    <div class="col-auto d-flex align-items-center gap-2">
+      <button id="bgetfutures" class="btn btn-outline-secondary btn-sm"
+              onclick="refreshFutures()" title="Re-enumerate FUTURE products visible to your API key">
+        <i class="bi bi-arrow-clockwise"></i> Get Futures
+      </button>
+      <select class="form-select form-select-sm" id="cryptoDropdown"
+              style="max-width:180px;" onchange="onCryptoChange()">
+        <option value="">— Browse Products —</option>
+      </select>
+      <span id="futuresStatus" class="text-muted small"></span>
+    </div>
+
     <div class="col-auto">
       <button type="button" class="btn btn-primary" onclick="confirmSave()">Save Script</button>
     </div>
@@ -70,6 +83,44 @@
 
 
 
-<script src="/static/js/editor.js"></script> 
-<script src="/static/js/algorithms.js"></script> 
+<!-- Futures Products List Modal -->
+<div class="modal fade" id="futuresListModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header py-2">
+        <h6 class="modal-title mb-0" id="futuresListModalLabel">Tradeable Products</h6>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body p-2">
+        <div id="futuresListContent">
+          <div class="text-center py-4"><div class="spinner-border spinner-border-sm" role="status"></div> Loading…</div>
+        </div>
+      </div>
+      <div class="modal-footer py-2">
+        <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Futures Product Detail (JSON) Modal -->
+<div class="modal fade" id="futuresDetailModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-xl modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header py-2">
+        <h6 class="modal-title mb-0" id="futuresDetailModalLabel">Product Detail</h6>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body p-2">
+        <pre id="futuresDetailContent" style="font-size:0.78rem;max-height:70vh;overflow:auto;margin:0;"></pre>
+      </div>
+      <div class="modal-footer py-2">
+        <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="/static/js/editor.js"></script>
+<script src="/static/js/algorithms.js"></script>
 {% endblock %}
