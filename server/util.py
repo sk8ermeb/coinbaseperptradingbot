@@ -201,6 +201,7 @@ class util:
                 contract_size TEXT,
                 base_min_size TEXT,
                 base_increment TEXT,
+                price_increment TEXT,
                 contract_expiry TEXT,
                 contract_expiry_type TEXT,
                 product_venue TEXT,
@@ -210,6 +211,10 @@ class util:
                 us_enabled INTEGER,
                 updated_at INTEGER
             )""")
+            try:
+                cur.execute("ALTER TABLE futures_products ADD COLUMN price_increment TEXT")
+            except Exception:
+                pass
             cur.execute("""CREATE TABLE IF NOT EXISTS liveorder (
                 id INTEGER PRIMARY KEY,
                 scriptid INTEGER,
@@ -393,6 +398,7 @@ class util:
             fd.get('contract_size') or '',
             product.get('base_min_size') or '',
             product.get('base_increment') or '',
+            product.get('price_increment') or product.get('quote_increment') or '',
             fd.get('contract_expiry') or '',
             fd.get('contract_expiry_type') or '',
             product.get('product_venue') or '',
@@ -405,9 +411,9 @@ class util:
         succ = self.runupdate(
             """INSERT OR REPLACE INTO futures_products
                (product_id, contract_root_unit, contract_size, base_min_size, base_increment,
-                contract_expiry, contract_expiry_type, product_venue, quote_currency_id,
-                display_name, view_only, us_enabled, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                price_increment, contract_expiry, contract_expiry_type, product_venue,
+                quote_currency_id, display_name, view_only, us_enabled, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             params,
         )
         return succ >= 0

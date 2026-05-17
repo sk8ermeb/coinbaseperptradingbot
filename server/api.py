@@ -365,13 +365,14 @@ async def live_balance(session: str = Depends(require_session)):
         unrealized = _amount('unrealized_pnl')
         available = _amount('available_margin')
         buying_power = _amount('futures_buying_power')
-        # Compute free margin from the atomic fields. Coinbase's `available_margin`
-        # has been observed to lag for INTX-opened positions, so we derive it.
+        # Prefer Coinbase's `available_margin` (authoritative for FCM/CDE — it
+        # accounts for fee reserves the atomic fields miss). Derived value is the
+        # fallback in case Coinbase returns 0 (rare INTX lag).
         usd_computed = total - initial_margin - hold
-        if usd_computed > 0:
-            usd = usd_computed
-        elif available > 0:
+        if available > 0:
             usd = available
+        elif usd_computed > 0:
+            usd = usd_computed
         else:
             usd = buying_power
         return JSONResponse({
@@ -427,6 +428,7 @@ async def live_account(session: str = Depends(require_session),
         'initial_margin': 0.0, 'open_orders_hold': 0.0,
         'realposition': 0.0, 'costbasis': 0.0,
         'mark_price': 0.0, 'contract_size': None, 'base_increment': None,
+        'price_increment': None,
         'max_leverage': None, 'product_venue': '', 'base_currency': '',
         'errors': {},
     }
@@ -444,7 +446,9 @@ async def live_account(session: str = Depends(require_session),
         available = _amt('available_margin')
         buying_power = _amt('futures_buying_power')
         usd_computed = total - initial_margin - hold
-        out['usd']               = round(usd_computed if usd_computed > 0 else (available or buying_power), 2)
+        # Prefer Coinbase's `available_margin` (authoritative for FCM/CDE).
+        # Fall back to derived value if it's 0 (rare INTX-lag case), then to buying_power.
+        out['usd']               = round(available if available > 0 else (usd_computed if usd_computed > 0 else buying_power), 2)
         out['total_equity']      = round(total, 2)
         out['unrealized_pnl']    = round(unrealized, 2)
         out['initial_margin']    = round(initial_margin, 2)
@@ -479,6 +483,10 @@ async def live_account(session: str = Depends(require_session),
         else:                   mark = float(product.get('price') or 0)
         out['mark_price'] = round(mark, 2)
         out['base_increment'] = float(product.get('base_increment') or 0) or None
+        # `price_increment` is the actual price tick (e.g. $5 for CDE BTC futures);
+        # `quote_increment` is just USD precision and is misleading on coarse-tick products.
+        out['price_increment'] = (float(product.get('price_increment') or 0) or
+                                  float(product.get('quote_increment') or 0) or None)
         out['product_venue']  = (product.get('product_venue') or '').upper()
         out['base_currency']  = (product.get('base_currency_id') or product.get('base_name') or '').upper()
         fpd = product.get('future_product_details') or {}

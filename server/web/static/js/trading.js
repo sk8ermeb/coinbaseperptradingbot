@@ -198,6 +198,8 @@ async function refreshAccountForProduct(productId) {
     }
     document.getElementById('acc_contract_size').textContent =
       data.contract_size != null ? data.contract_size + (baseSym ? ' ' + baseSym : '') : '—';
+    document.getElementById('acc_price_tick').textContent =
+      data.price_increment != null ? '$' + data.price_increment : '—';
     document.getElementById('acc_pair').textContent = data.product_id || productId;
     document.getElementById('acc_base').textContent = baseSym || '—';
     document.getElementById('lastupdate').textContent =
@@ -245,6 +247,8 @@ function updateAccountPanel(data) {
   const baseSym = (data.base_currency || '').toUpperCase();
   document.getElementById('acc_contract_size').textContent =
     data.contract_size != null ? data.contract_size + (baseSym ? ' ' + baseSym : '') : '—';
+  document.getElementById('acc_price_tick').textContent =
+    data.price_increment != null ? '$' + data.price_increment : '—';
   document.getElementById('acc_pair').textContent = productId;
   document.getElementById('acc_base').textContent = baseSym || '—';
   document.getElementById('acc_gran').textContent = data.granularity || '—';
