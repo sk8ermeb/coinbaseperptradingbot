@@ -365,19 +365,19 @@ async def live_balance(session: str = Depends(require_session)):
         unrealized = _amount('unrealized_pnl')
         available = _amount('available_margin')
         buying_power = _amount('futures_buying_power')
-        # Prefer Coinbase's `available_margin` (authoritative for FCM/CDE — it
-        # accounts for fee reserves the atomic fields miss). Derived value is the
-        # fallback in case Coinbase returns 0 (rare INTX lag).
+        # `futures_buying_power` matches Coinbase's UI "free margin" exactly.
+        # `available_margin` empirically returns ~total equity on FCM/CDE
+        # (e.g. $295 when free is $96) — not safe as a primary source.
         usd_computed = total - initial_margin - hold
-        if available > 0:
-            usd = available
-        elif usd_computed > 0:
-            usd = usd_computed
-        else:
+        if buying_power > 0:
             usd = buying_power
+        elif available > 0:
+            usd = available
+        else:
+            usd = max(usd_computed, 0)
         return JSONResponse({
             'usd': round(usd, 2),
-            'total_equity': round(total or usd, 2),
+            'total_equity': round((total + unrealized) if total else usd, 2),
             'unrealized_pnl': round(unrealized, 2),
             'initial_margin': round(initial_margin, 2),
             'open_orders_hold': round(hold, 2),
@@ -446,10 +446,18 @@ async def live_account(session: str = Depends(require_session),
         available = _amt('available_margin')
         buying_power = _amt('futures_buying_power')
         usd_computed = total - initial_margin - hold
-        # Prefer Coinbase's `available_margin` (authoritative for FCM/CDE).
-        # Fall back to derived value if it's 0 (rare INTX-lag case), then to buying_power.
-        out['usd']               = round(available if available > 0 else (usd_computed if usd_computed > 0 else buying_power), 2)
-        out['total_equity']      = round(total, 2)
+        # `futures_buying_power` is the actual "free margin" Coinbase's UI shows.
+        # `available_margin` empirically returns ~total equity on FCM/CDE
+        # (e.g. $295 when free is $96) — not safe as a primary source.
+        if buying_power > 0:
+            out['usd'] = round(buying_power, 2)
+        elif available > 0:
+            out['usd'] = round(available, 2)
+        else:
+            out['usd'] = round(max(usd_computed, 0), 2)
+        # total_usd_balance is static (spot + futures pool cash, no mark-to-market).
+        # Add unrealized_pnl so the displayed equity moves with price.
+        out['total_equity']      = round(total + unrealized, 2)
         out['unrealized_pnl']    = round(unrealized, 2)
         out['initial_margin']    = round(initial_margin, 2)
         out['open_orders_hold']  = round(hold, 2)

@@ -37,6 +37,9 @@ class LiveTrader:
         self._price_increment = None  # price tick (from API price_increment, e.g. 5.0 for CDE BTC futures)
         self._contract_size = None
         self._product_venue = None  # 'FCM'/'CDE' (base_size = contract count) vs 'INTX' (base_size = base asset qty)
+        self._ws_client = None
+        self._ws_product_id = None
+        self._seen_order_states = {}  # order_id -> last status (dedupes repeat WS messages)
 
     # ------------------------------------------------------------------ startup
 
@@ -50,6 +53,7 @@ class LiveTrader:
     def stop(self):
         self.running = False
         lutil.setkeyval('live_running', 'false')
+        self._stop_ws()
         self._livelog("Live trader stopped by user")
 
     # ------------------------------------------------------------------ logging
@@ -130,6 +134,7 @@ class LiveTrader:
 
         # Read account data first so the UI is populated immediately
         self._load_product_limits(product_id)
+        self._start_ws(product_id)
         self._read_account_state(product_id)
         self._load_history(product_id)
         self._livelog("History loaded — waiting for next candle close")
@@ -313,10 +318,12 @@ class LiveTrader:
     def _read_account_state(self, product_id):
         cb = CoinbaseHTTP()
 
-        # Balance summary — prefer Coinbase's `available_margin` directly.
-        # It accounts for things our derived `total - initial - hold` misses
-        # (fee reserves, FCM cushion, etc.) and is authoritative for FCM/CDE.
-        # Fall back to the derived value if Coinbase returns 0 (rare INTX lag).
+        # Balance summary — `futures_buying_power` is the actual free margin
+        # the Coinbase UI shows ("what you can open new positions with").
+        # `available_margin` sounds right but empirically returns ~total equity
+        # on FCM/CDE accounts (e.g. $295 when free is $96) — DO NOT use it as
+        # the primary source. Order of preference: futures_buying_power →
+        # available_margin → derived (total − initial − hold).
         try:
             data = cb.get_balance_summary()
             bal = data.get('balance_summary', {})
@@ -333,24 +340,27 @@ class LiveTrader:
             unrealized     = _amount('unrealized_pnl')
 
             usd_computed = total - initial_margin - hold
-            if available > 0:
-                self.namespace['usd'] = available
-            elif usd_computed > 0:
-                self.namespace['usd'] = usd_computed
-            else:
+            if buying_power > 0:
                 self.namespace['usd'] = buying_power
+            elif available > 0:
+                self.namespace['usd'] = available
+            else:
+                self.namespace['usd'] = max(usd_computed, 0)
 
             # Store Coinbase-reported values so get_status() can return them
             # directly instead of recomputing (the local locked/upnl math used
             # the script's leverage and ignored contract_size — wildly wrong).
+            # total_usd_balance is a static snapshot of (spot + futures pool)
+            # cash; it doesn't mark-to-market. Add unrealized_pnl so the
+            # displayed equity moves with price.
             self.namespace['unrealized_pnl'] = unrealized
-            self.namespace['total_equity'] = total
+            self.namespace['total_equity'] = total + unrealized
             self.namespace['initial_margin'] = initial_margin
 
             self._livelog(
                 f"Free margin: ${self.namespace['usd']:.2f} "
-                f"(Coinbase available_margin ${available:.2f}; derived total ${total:.2f} "
-                f"− initial_margin ${initial_margin:.2f} − holds ${hold:.2f} = ${usd_computed:.2f}) "
+                f"(futures_buying_power ${buying_power:.2f}; available_margin ${available:.2f}; "
+                f"derived total ${total:.2f} − initial_margin ${initial_margin:.2f} − holds ${hold:.2f} = ${usd_computed:.2f}) "
                 f"| Unrealized PnL: ${unrealized:.2f}"
             )
         except Exception:
@@ -437,14 +447,35 @@ class LiveTrader:
 
             pending = []
             for o in orders_list:
-                cfg = o.get('order_configuration', {})
-                limit_cfg = cfg.get('limit_limit_gtc', {})
-                lp = float(limit_cfg.get('limit_price', 0) or 0)
+                cfg = o.get('order_configuration', {}) or {}
+                # Pull limit and stop from whichever config block is present.
+                # limit_limit_gtc/gtd: limit_price
+                # stop_limit_stop_limit_gtc/gtd: limit_price + stop_price
+                # trigger_bracket_gtc/gtd: limit_price + stop_trigger_price
+                lp = 0.0
+                sp = 0.0
+                for v in cfg.values():
+                    if not isinstance(v, dict):
+                        continue
+                    if v.get('limit_price'):
+                        lp = float(v.get('limit_price') or 0)
+                    if v.get('stop_price'):
+                        sp = float(v.get('stop_price') or 0)
+                    elif v.get('stop_trigger_price'):
+                        sp = float(v.get('stop_trigger_price') or 0)
+                if lp > 0 and sp > 0:
+                    ordertype = 'Bracket'
+                elif sp > 0:
+                    ordertype = 'Stop'
+                elif lp > 0:
+                    ordertype = 'Limit'
+                else:
+                    ordertype = 'Market'
                 pending.append({
                     'id': o.get('order_id', ''),
-                    'ordertype': 'Limit' if lp > 0 else 'Market',
+                    'ordertype': ordertype,
                     'price': lp, 'amount': float(o.get('base_size', 0) or 0),
-                    'stopprice': 0, 'limitprice': lp,
+                    'stopprice': sp, 'limitprice': lp,
                     'limittrailpercent': 0, 'stoptrailpercent': 0,
                     'tradetype': 'Buy' if o.get('side') == 'BUY' else 'Sell',
                 })
@@ -651,6 +682,87 @@ class LiveTrader:
         except Exception:
             self._livelog(f"Could not load product limits:\n{traceback.format_exc()}")
 
+    # ------------------------------------------------------------------ websocket: fill/cancel notifications
+
+    def _start_ws(self, product_id):
+        """Open a WSClient on Coinbase's 'user' channel for this product so we
+        get pushed FILLED/CANCELLED order events in real time instead of waiting
+        for the next candle tick. The SDK runs its own listener thread."""
+        # Clean up any prior client first (e.g. restart from _run_with_restart).
+        self._stop_ws()
+        try:
+            from coinbase.websocket import WSClient
+            key_name = lutil.getkeyval('cbkey')
+            key_secret = lutil.getkeyval('cbsecret')
+            if not key_name or not key_secret:
+                self._livelog("WS: skipping fill subscription — no credentials")
+                return
+            key_secret = key_secret.replace('\\n', '\n').strip()
+            self._ws_client = WSClient(
+                api_key=key_name,
+                api_secret=key_secret,
+                on_message=self._on_ws_message,
+                on_open=lambda: self._livelog(f"WS: user channel connected for {product_id}"),
+                on_close=lambda: self._livelog("WS: user channel disconnected"),
+                retry=True,
+                verbose=False,
+            )
+            self._ws_client.open()
+            self._ws_client.user(product_ids=[product_id])
+            self._ws_product_id = product_id
+        except Exception:
+            self._livelog(f"WS: failed to start:\n{traceback.format_exc()}")
+            self._ws_client = None
+
+    def _stop_ws(self):
+        if self._ws_client:
+            try:
+                self._ws_client.close()
+            except Exception:
+                pass
+        self._ws_client = None
+        self._seen_order_states = {}
+
+    def _on_ws_message(self, raw_msg):
+        try:
+            data = json.loads(raw_msg) if isinstance(raw_msg, str) else raw_msg
+            if data.get('channel') != 'user':
+                return
+            for ev in (data.get('events') or []):
+                for order in (ev.get('orders') or []):
+                    self._handle_order_update(order)
+        except Exception:
+            self._livelog(f"WS: message handler error:\n{traceback.format_exc()}")
+
+    def _handle_order_update(self, order):
+        """Dedupe by (order_id, status); only emit on FILLED/CANCELLED-class
+        transitions. Triggers _read_account_state so position/equity refresh
+        immediately rather than at the next candle close."""
+        order_id = order.get('order_id') or ''
+        status = (order.get('status') or '').upper()
+        if not order_id or not status:
+            return
+        if self._seen_order_states.get(order_id) == status:
+            return
+        self._seen_order_states[order_id] = status
+        if status not in ('FILLED', 'CANCELLED', 'EXPIRED', 'FAILED'):
+            return
+        side = order.get('order_side') or order.get('side') or ''
+        filled = order.get('cumulative_quantity') or order.get('filled_size') or '0'
+        avg_price = order.get('avg_price') or order.get('average_filled_price') or '0'
+        product = order.get('product_id') or self._ws_product_id or ''
+        event_type = 'fill' if status == 'FILLED' else 'cancel'
+        self._log_event(event_type, {
+            'order_id': order_id, 'product_id': product, 'side': side,
+            'status': status, 'filled': str(filled), 'avg_price': str(avg_price),
+        })
+        self._livelog(f"WS {status}: {side} {filled} {product} @ {avg_price}")
+        try:
+            if self._ws_product_id:
+                self._read_account_state(self._ws_product_id)
+        except Exception:
+            self._livelog(f"WS: account refresh after {status} failed:\n{traceback.format_exc()}")
+
     def _round_to_increment(self, size: float) -> float:
         """Round a base-asset (BTC) quantity DOWN to the nearest whole contract.
         Whole-contract granularity = contract_size, regardless of venue (the base_size
@@ -849,7 +961,14 @@ class LiveTrader:
                 if pos == 0:
                     self._livelog("Exit requested but no open position")
                     return
-                close_qty = abs(pos) if amount == 0 else min(amount, abs(pos))
+                # realposition and user-supplied Exit `amount` are in CONTRACTS;
+                # downstream helpers (_round_to_increment, _format_base_size)
+                # work in BASE-ASSET (BTC) units. Convert here or you end up
+                # selling 100 contracts when you have 1.
+                cs = self._contract_size or 1.0
+                pos_base = abs(pos) * cs
+                req_base = (amount * cs) if amount > 0 else pos_base
+                close_qty = min(req_base, pos_base)
                 close_qty = self._round_to_increment(close_qty)
                 if close_qty <= 0:
                     self._notify_order_error(
@@ -860,18 +979,45 @@ class LiveTrader:
                     )
                     return
                 base_size = self._format_base_size(close_qty)
-                if limitprice > 0:
-                    side = 'SELL' if pos > 0 else 'BUY'
-                    intent = f"EXIT limit {'sell' if pos>0 else 'buy'} {base_size} @ {limitprice}"
+                side = 'SELL' if pos > 0 else 'BUY'
+                action = 'sell' if pos > 0 else 'buy'
+                if limitprice > 0 and stopprice > 0:
+                    # TP+SL bracket (Coinbase calls this "TP/SL" in the UI). One
+                    # of the two triggers fills, the other is auto-cancelled.
+                    intent = f"EXIT bracket {action} {base_size} TP@{limitprice} SL@{stopprice}"
+                    resp = self._cb_create_order(cb, order_id, product_id, side, {
+                        'trigger_bracket_gtc': {
+                            'base_size': base_size,
+                            'limit_price': self._format_price(limitprice),
+                            'stop_trigger_price': self._format_price(stopprice),
+                        }
+                    })
+                    if not self._check_order_response(resp, intent): return
+                    cb_order_id = self._get_cb_order_id(resp, order_id, product_id)
+                    self._livelog(intent)
+                elif limitprice > 0:
+                    intent = f"EXIT limit {action} {base_size} @ {limitprice}"
                     resp = self._cb_create_order(cb, order_id, product_id, side, {
                         'limit_limit_gtc': {'base_size': base_size, 'limit_price': self._format_price(limitprice)}
                     })
                     if not self._check_order_response(resp, intent): return
                     cb_order_id = self._get_cb_order_id(resp, order_id, product_id)
                     self._livelog(intent)
+                elif stopprice > 0:
+                    intent = f"EXIT stop {action} {base_size} @ {stopprice}"
+                    resp = self._cb_create_order(cb, order_id, product_id, side, {
+                        'stop_limit_stop_limit_gtc': {
+                            'base_size': base_size,
+                            'limit_price': self._format_stop_limit_price(stopprice, side),
+                            'stop_price': self._format_price(stopprice),
+                            'stop_direction': 'STOP_DIRECTION_STOP_DOWN' if pos > 0 else 'STOP_DIRECTION_STOP_UP',
+                        }
+                    })
+                    if not self._check_order_response(resp, intent): return
+                    cb_order_id = self._get_cb_order_id(resp, order_id, product_id)
+                    self._livelog(intent)
                 else:
-                    side = 'SELL' if pos > 0 else 'BUY'
-                    intent = f"EXIT market {'sell' if pos>0 else 'buy'} {base_size}"
+                    intent = f"EXIT market {action} {base_size}"
                     resp = self._cb_create_order(cb, order_id, product_id, side, {
                         'market_market_ioc': {'base_size': base_size}
                     })
@@ -882,7 +1028,8 @@ class LiveTrader:
             elif tradetype == util.TradeType.Buy:
                 if realposition < 0:
                     close_id = str(uuid.uuid4())
-                    base_size = self._format_base_size(self._round_to_increment(abs(realposition)))
+                    cs = self._contract_size or 1.0
+                    base_size = self._format_base_size(self._round_to_increment(abs(realposition) * cs))
                     intent = f"BUY: close short {base_size} at market"
                     resp = self._cb_create_order(cb, close_id, product_id, 'BUY', {
                         'market_market_ioc': {'base_size': base_size}
@@ -936,7 +1083,8 @@ class LiveTrader:
             elif tradetype == util.TradeType.Sell:
                 if realposition > 0:
                     close_id = str(uuid.uuid4())
-                    base_size = self._format_base_size(self._round_to_increment(realposition))
+                    cs = self._contract_size or 1.0
+                    base_size = self._format_base_size(self._round_to_increment(realposition * cs))
                     intent = f"SELL: close long {base_size} at market"
                     resp = self._cb_create_order(cb, close_id, product_id, 'SELL', {
                         'market_market_ioc': {'base_size': base_size}
@@ -987,8 +1135,14 @@ class LiveTrader:
                     cb_order_id = self._get_cb_order_id(resp, order_id, product_id)
                     self._livelog(intent)
 
-            # Track order in DB for trailing management
-            if cb_order_id and (ltp > 0 or stp > 0):
+            # Track EVERY order in the DB. The next-tick reconciliation pass in
+            # _read_account_state queries Coinbase for each open row and fires
+            # fill/cancel/fail events for any terminal transitions — this is the
+            # safety net for WS messages we missed (network blip, server restart,
+            # subscription that hadn't connected yet when the order resolved).
+            # Trailing-update logic in _update_trailing_orders already filters
+            # by limittrailpercent>0 so non-trailing rows are inert there.
+            if cb_order_id:
                 base_size_f = float(amount_notional / (limitprice or stopprice or close_price or 1))
                 lutil.runinsert(
                     "INSERT OR IGNORE INTO liveorder "

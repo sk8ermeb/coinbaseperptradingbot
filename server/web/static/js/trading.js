@@ -141,7 +141,8 @@ function startPolling() {
     }
   }, 3000);
 
-  pricePollTimer = setInterval(pollPrice, 5000);
+  pricePollTimer = setInterval(() => { pollPrice(); pollBalance(); }, 5000);
+  pollBalance();
 }
 
 function stopPolling() {
@@ -150,7 +151,7 @@ function stopPolling() {
   // Resume idle account polling now that the bot isn't running.
   if (idleBalanceTimer) clearInterval(idleBalanceTimer);
   refreshAccountForProduct(currentProductId);
-  idleBalanceTimer = setInterval(() => refreshAccountForProduct(currentProductId), 15000);
+  idleBalanceTimer = setInterval(() => { refreshAccountForProduct(currentProductId); pollBalance(); }, 15000);
 }
 
 async function pollStatus() {
@@ -184,6 +185,8 @@ async function refreshAccountForProduct(productId) {
     const baseSym = (data.base_currency || '').toUpperCase();
     document.getElementById('acc_usd').textContent    = '$' + fmt(data.usd);
     document.getElementById('acc_equity').textContent = '$' + fmt(data.total_equity);
+    document.getElementById('acc_initial_margin').textContent =
+      data.initial_margin != null ? '$' + fmt(data.initial_margin) : '—';
     const pos = data.realposition;
     const posEl = document.getElementById('acc_pos');
     posEl.textContent = fmt(pos, 6);
@@ -220,6 +223,29 @@ async function pollPrice() {
   } catch(e) {}
 }
 
+// PnL/equity/margin move with mark price. /api/live/status only refreshes
+// every ~15s and only reflects what the trader cached at the last candle
+// close (e.g. once an hour on ONE_HOUR), so we poll /api/live/balance
+// (one cheap Coinbase call) directly on a faster cadence.
+async function pollBalance() {
+  try {
+    const resp = await fetch('/api/live/balance');
+    if (!resp.ok) return;
+    const data = await resp.json();
+    if (data.usd != null)
+      document.getElementById('acc_usd').textContent = '$' + fmt(data.usd);
+    if (data.total_equity != null)
+      document.getElementById('acc_equity').textContent = '$' + fmt(data.total_equity);
+    if (data.initial_margin != null)
+      document.getElementById('acc_initial_margin').textContent = '$' + fmt(data.initial_margin);
+    if (data.unrealized_pnl != null) {
+      const pnlEl = document.getElementById('acc_upnl');
+      pnlEl.textContent = (data.unrealized_pnl >= 0 ? '+' : '') + '$' + fmt(data.unrealized_pnl);
+      pnlEl.style.color = data.unrealized_pnl >= 0 ? '#26a69a' : '#ef5350';
+    }
+  } catch(e) {}
+}
+
 // ------------------------------------------------------------------ account panel
 
 function fmt(n, dec=2) {
@@ -230,6 +256,8 @@ function fmt(n, dec=2) {
 function updateAccountPanel(data) {
   document.getElementById('acc_usd').textContent    = '$' + fmt(data.usd);
   document.getElementById('acc_equity').textContent = '$' + fmt(data.total_equity);
+  document.getElementById('acc_initial_margin').textContent =
+    data.initial_margin != null ? '$' + fmt(data.initial_margin) : '—';
   const pos = data.realposition;
   const posEl = document.getElementById('acc_pos');
   posEl.textContent = fmt(pos, 6);
@@ -574,7 +602,8 @@ async function refreshOpenOrdersModal() {
       const cfgKey = Object.keys(cfg)[0] || '';
       const cfgVal = cfg[cfgKey] || {};
       const limit = cfgVal.limit_price || '—';
-      const stop = cfgVal.stop_price || '—';
+      // trigger_bracket_gtc/gtd uses stop_trigger_price; stop_limit_* uses stop_price
+      const stop = cfgVal.stop_price || cfgVal.stop_trigger_price || '—';
       const size = cfgVal.base_size || cfgVal.quote_size || '—';
       let created = '—';
       if (o.created_time) {
@@ -642,7 +671,7 @@ async function refreshOpenOrdersModal() {
   if (!isRunning && currentProductId) {
     await refreshAccountForProduct(currentProductId);
     if (idleBalanceTimer) clearInterval(idleBalanceTimer);
-    idleBalanceTimer = setInterval(() => refreshAccountForProduct(currentProductId), 15000);
+    idleBalanceTimer = setInterval(() => { refreshAccountForProduct(currentProductId); pollBalance(); }, 15000);
     loadCandles();
   }
 
