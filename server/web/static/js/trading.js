@@ -450,24 +450,37 @@ function renderEvents(events, page) {
     tbody.appendChild(tr);
   }
 
+  // Always render pagination affordance at the bottom. Disable each button
+  // when there's nothing to navigate to so the controls are still visible.
   const paginationEl = document.getElementById('eventpagination');
   paginationEl.innerHTML = '';
-  if (page > 0 || events.length === 300) {
-    if (events.length === 300) {
-      const btn = document.createElement('button');
-      btn.className = 'btn btn-sm btn-outline-secondary me-2';
-      btn.textContent = '← Older';
-      btn.onclick = () => loadHistory(page + 1);
-      paginationEl.appendChild(btn);
-    }
-    if (page > 0) {
-      const btn = document.createElement('button');
-      btn.className = 'btn btn-sm btn-outline-secondary';
-      btn.textContent = 'Newer →';
-      btn.onclick = () => loadHistory(page - 1);
-      paginationEl.appendChild(btn);
-    }
+  paginationEl.className = 'mt-2 mb-3 d-flex align-items-center gap-2';
+
+  const hasOlder = events.length === 300;
+  const hasNewer = page > 0;
+
+  const olderBtn = document.createElement('button');
+  olderBtn.className = 'btn btn-sm btn-outline-secondary';
+  olderBtn.textContent = '← Older';
+  olderBtn.disabled = !hasOlder;
+  olderBtn.onclick = () => loadHistory(page + 1);
+  paginationEl.appendChild(olderBtn);
+
+  const newerBtn = document.createElement('button');
+  newerBtn.className = 'btn btn-sm btn-outline-secondary';
+  newerBtn.textContent = 'Newer →';
+  newerBtn.disabled = !hasNewer;
+  newerBtn.onclick = () => loadHistory(page - 1);
+  paginationEl.appendChild(newerBtn);
+
+  const status = document.createElement('span');
+  status.className = 'text-muted small ms-2';
+  if (events.length === 0 && page === 0) {
+    status.textContent = 'No events yet';
+  } else {
+    status.textContent = `Page ${page + 1} — ${events.length} event${events.length === 1 ? '' : 's'}`;
   }
+  paginationEl.appendChild(status);
 }
 
 // ------------------------------------------------------------------ tick detail modal
