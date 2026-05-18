@@ -37,6 +37,7 @@ class LiveTrader:
         self._price_increment = None  # price tick (from API price_increment, e.g. 5.0 for CDE BTC futures)
         self._contract_size = None
         self._product_venue = None  # 'FCM'/'CDE' (base_size = contract count) vs 'INTX' (base_size = base asset qty)
+        self._base_currency = ''    # e.g. 'BTC' — for the status panel's "Base" field
         self._ws_client = None
         self._ws_product_id = None
         self._seen_order_states = {}  # order_id -> last status (dedupes repeat WS messages)
@@ -62,10 +63,12 @@ class LiveTrader:
         ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
         entry = f"{ts}: {msg}"
         print(f"[LIVE] {entry}")
-        existing = lutil.getkeyval('live_log') or ''
+        # Scope the log per-script so switching algorithms doesn't bleed history
+        key = f'live_log_{self.scriptid}'
+        existing = lutil.getkeyval(key) or ''
         lines = existing.split('\n') if existing else []
         lines.append(entry)
-        lutil.setkeyval('live_log', '\n'.join(lines[-500:]))
+        lutil.setkeyval(key, '\n'.join(lines[-500:]))
 
     def _log_event(self, event_type, data):
         try:
@@ -646,6 +649,12 @@ class LiveTrader:
             self._product_venue = (product.get('product_venue') or '').upper()
 
             future_details = product.get('future_product_details') or {}
+            # For futures, base_currency_id / base_name are usually blank — the
+            # root unit lives on future_product_details.contract_root_unit.
+            self._base_currency = (
+                product.get('base_currency_id') or product.get('base_name') or
+                future_details.get('contract_root_unit') or ''
+            ).upper()
             api_contract_size = float(future_details.get('contract_size') or 0)
             perp_details = future_details.get('perpetual_details') or {}
             max_leverage = float(perp_details.get('max_leverage') or 0)
@@ -681,6 +690,15 @@ class LiveTrader:
             )
         except Exception:
             self._livelog(f"Could not load product limits:\n{traceback.format_exc()}")
+
+        # Last-resort fallback: pull the root unit from the local cache so the
+        # status panel's "Base" field never goes blank when the product is known.
+        if not self._base_currency:
+            try:
+                row = lutil.get_futures_product(product_id) or {}
+                self._base_currency = (row.get('contract_root_unit') or '').upper()
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------ websocket: fill/cancel notifications
 
@@ -1224,8 +1242,9 @@ class LiveTrader:
             'contract_size': self._contract_size,
             'base_increment': self._base_increment,
             'price_increment': self._price_increment,
+            'base_currency': self._base_currency,
             'last_tick_time': int(self.namespace.get('time', 0)),
-            'log': (lutil.getkeyval('live_log') or '').split('\n')[-100:],
+            'log': (lutil.getkeyval(f'live_log_{self.scriptid}') or '').split('\n')[-100:],
         }
 
 
@@ -1246,10 +1265,11 @@ def start_trader(scriptid: int) -> LiveTrader:
             _trader.stop()
             time.sleep(1)
         sep = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC") + ": ── session started ──"
-        existing = lutil.getkeyval('live_log') or ''
+        key = f'live_log_{scriptid}'
+        existing = lutil.getkeyval(key) or ''
         lines = existing.split('\n') if existing else []
         lines.append(sep)
-        lutil.setkeyval('live_log', '\n'.join(lines[-500:]))
+        lutil.setkeyval(key, '\n'.join(lines[-500:]))
         _trader = LiveTrader(scriptid)
         _trader.start()
         return _trader

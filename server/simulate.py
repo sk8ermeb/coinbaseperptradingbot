@@ -84,6 +84,7 @@ class Simulation:
         self._base_increment = 1.0
         self._base_min_size = 1.0
         self._contract_size = 0.01
+        self._min_contracts = 1   # minimum order in CONTRACTS (computed below)
         self._product_venue = ''
         historicalpair = ''
 
@@ -145,6 +146,20 @@ class Simulation:
         if self.good and historicalpair in KNOWN_CONTRACT_SIZES and self._product_venue.upper() == 'INTX':
             self._contract_size = KNOWN_CONTRACT_SIZES[historicalpair]
 
+        # Compute minimum order size in CONTRACTS. base_min_size from the API is
+        # in CONTRACTS for FCM/CDE but in BASE-ASSET units for INTX (mirrors how
+        # live.py interprets it). _floor_contracts(below-min) returns 0.
+        if self.good:
+            venue = (self._product_venue or '').upper()
+            try:
+                if venue in ('FCM', 'CDE'):
+                    self._min_contracts = max(int(round(self._base_min_size)), 1)
+                else:
+                    cs = self._contract_size or 1.0
+                    self._min_contracts = max(int(round(self._base_min_size / cs)) if cs > 0 else 1, 1)
+            except Exception:
+                self._min_contracts = 1
+
         if self.good:
             self.simcandles = sutil.gethistoricledata(self.granularity, historicalpair, self.start, self.stop)
         else:
@@ -156,6 +171,7 @@ class Simulation:
         sutil.setkeyval(f'sim_{self.simid}_leverage', str(self.namespace['leverage']))
         sutil.setkeyval(f'sim_{self.simid}_contract_size', str(self._contract_size))
         sutil.setkeyval(f'sim_{self.simid}_base_increment', str(self._base_increment))
+        sutil.setkeyval(f'sim_{self.simid}_min_contracts', str(self._min_contracts))
         sutil.setkeyval(f'sim_{self.simid}_product_id', product_id)
         sutil.setkeyval(f'sim_{self.simid}_historical_product_id', historicalpair)
 
@@ -168,7 +184,8 @@ class Simulation:
                 f"Sim started — Product_ID:{product_id} historical:{historicalpair} "
                 f"granularity:{self.granularity} USD:{self.namespace['usd']:.2f} "
                 f"leverage:{self.namespace['leverage']}x contract_size:{self._contract_size} "
-                f"base_increment:{self._base_increment}"
+                f"base_increment:{self._base_increment} min_contracts:{self._min_contracts} "
+                f"venue:{self._product_venue or '?'}"
             )
 
         self._SimUSDStart = self.namespace['usd']
@@ -185,13 +202,18 @@ class Simulation:
         self._SimTradeList = []
 
 
-    def _floor_contracts(self, val: float) -> float:
-        """Floor BTC amount to nearest whole contract, preserving sign."""
-        if val == 0:
-            return 0.0
-        cs = self._contract_size
-        contracts = math.floor(abs(val) / cs)
-        return math.copysign(contracts * cs, val)
+    def _floor_contracts(self, base_qty: float) -> int:
+        """Floor a base-asset quantity (e.g. BTC) to a signed integer contract
+        count. Returns 0 when the floored count is below the product's minimum
+        — callers treat 0 as "skip this fill" so we match live behavior, which
+        rejects sub-minimum orders rather than rounding them up."""
+        cs = self._contract_size or 0
+        if base_qty == 0 or cs <= 0:
+            return 0
+        contracts = int(math.floor(abs(base_qty) / cs))
+        if contracts < self._min_contracts:
+            return 0
+        return -contracts if base_qty < 0 else contracts
 
     def _cancel_order(self, order_id):
         positions = self.namespace['pendingpositions']
@@ -276,18 +298,22 @@ class Simulation:
 
     def compute_total_equity(self, close_price):
         """Total portfolio equity: free margin + locked margin + unrealized PnL.
-        Coinbase INTX cross-margin includes unrealized gains as available collateral."""
+        Coinbase INTX cross-margin includes unrealized gains as available collateral.
+        `realposition` is a signed contract count, so multiply by contract_size
+        to get base-asset exposure before applying price."""
         usd = self.namespace['usd']
         position = self.namespace['realposition']
         costbasis = self.namespace['costbasis']
         leverage = self.namespace['leverage']
+        cs = self._contract_size or 0
         if position == 0 or costbasis == 0:
             return usd
-        locked = abs(position) * costbasis / leverage
+        notional = abs(position) * cs * costbasis
+        locked = notional / leverage
         if position > 0:
-            upnl = (close_price - costbasis) * position
+            upnl = (close_price - costbasis) * position * cs
         else:
-            upnl = (costbasis - close_price) * abs(position)
+            upnl = (costbasis - close_price) * abs(position) * cs
         return usd + locked + upnl
 
 
@@ -298,7 +324,7 @@ class Simulation:
         total_equity = self.compute_total_equity(close_price)
         return (f"<br>&nbsp;&nbsp;&nbsp;<b>Free Margin:${usd:.2f}"
                 f" | Total Equity:${total_equity:.2f}"
-                f" | Contracts:{position:.6f}</b>")
+                f" | Contracts:{int(position)}</b>")
 
 
     def has_margin_to_enter(self, close_price):
@@ -317,13 +343,11 @@ class Simulation:
         return (total_equity * leverage * 0.99) / max(slots_remaining, 1)
 
 
-    def updatecostbasis(self, price, cryptoamount, fee):
+    def updatecostbasis(self, price, contracts, fee):
         """
-        Futures position accounting.
-
-        cryptoamount > 0 = buying contracts (enter long or exit short)
-        cryptoamount < 0 = selling contracts (enter short or exit long)
-        fee = fee rate (maker or taker), applied to notional value
+        Futures position accounting. `contracts` is a SIGNED integer contract
+        count (positive = buying, negative = selling); notional is derived as
+        price × |contracts| × contract_size.
 
         Entry: margin (notional / leverage) + fee deducted from usd.
         Exit:  margin returned + PnL realized, fee deducted from usd.
@@ -334,40 +358,42 @@ class Simulation:
         curprice = self.namespace['costbasis']
         currusd = self.namespace['usd']
         leverage = self.namespace['leverage']
+        cs = self._contract_size or 0
 
-        notional = abs(price * cryptoamount)
+        notional = abs(price * contracts * cs)
         newfee = notional * fee
         newprice = curprice
         newamount = curramount
         newusd = currusd
 
-        if price == 0 or cryptoamount == 0:
+        if price == 0 or contracts == 0 or cs <= 0:
             pass
-        elif (cryptoamount > 0 and curramount >= 0) or (cryptoamount < 0 and curramount <= 0):
+        elif (contracts > 0 and curramount >= 0) or (contracts < 0 and curramount <= 0):
             # Opening or increasing a position — deduct margin + fee from free balance
             margin_required = notional / leverage
-            newamount = curramount + cryptoamount
+            newamount = curramount + contracts
             if newamount != 0:
-                newprice = (abs(curramount) * curprice + abs(cryptoamount) * price) / abs(newamount)
+                newprice = (abs(curramount) * curprice + abs(contracts) * price) / abs(newamount)
             else:
                 newprice = price
             newusd = currusd - margin_required - newfee
-        elif (cryptoamount < 0 and curramount > 0) or (cryptoamount > 0 and curramount < 0):
+        elif (contracts < 0 and curramount > 0) or (contracts > 0 and curramount < 0):
             # Closing or reducing a position — return margin, realize PnL, deduct fee
-            closing_qty = min(abs(cryptoamount), abs(curramount))
+            closing_qty = min(abs(contracts), abs(curramount))
             if curramount > 0:
-                pnl = (price - curprice) * closing_qty
+                pnl = (price - curprice) * closing_qty * cs
             else:
-                pnl = (curprice - price) * closing_qty
-            margin_returned = (curprice * closing_qty) / leverage
-            newamount = curramount + cryptoamount
+                pnl = (curprice - price) * closing_qty * cs
+            margin_returned = (curprice * closing_qty * cs) / leverage
+            newamount = curramount + contracts
             newprice = curprice if abs(newamount) > 0 else 0.0
             newusd = currusd + margin_returned + pnl - newfee
 
-        self.namespace['realposition'] = newamount
+        # Position is always a signed integer count of contracts
+        self.namespace['realposition'] = int(newamount)
         self.namespace['costbasis'] = newprice
         self.namespace['usd'] = newusd
-        return (newprice, newamount, newusd, newfee, notional)
+        return (newprice, int(newamount), newusd, newfee, notional)
 
 
     def checkliquidation(self, candle):
@@ -378,11 +404,12 @@ class Simulation:
         costbasis = self.namespace['costbasis']
         close = float(candle['close'])
         leverage = self.namespace['leverage']
-        locked_margin = abs(position) * costbasis / leverage
+        cs = self._contract_size or 0
+        locked_margin = abs(position) * cs * costbasis / leverage
         if position > 0:
-            unrealized_pnl = (close - costbasis) * position
+            unrealized_pnl = (close - costbasis) * position * cs
         else:
-            unrealized_pnl = (costbasis - close) * abs(position)
+            unrealized_pnl = (costbasis - close) * abs(position) * cs
         # Liquidate when remaining equity falls below 20% of initial margin
         if locked_margin > 0 and (unrealized_pnl + locked_margin) <= locked_margin * 0.2:
             takerfee = self.namespace['takerfee']
@@ -572,6 +599,10 @@ class Simulation:
                                              f"<br>&nbsp;&nbsp;&nbsp;USD Balance:${newusd}"
                                              + self.margin_log_suffix(mark))
                             crypt = self._floor_contracts(amount / limitprice)
+                            if crypt == 0:
+                                sutil.simlog(f"Buy Limit skipped — computed size below min_contracts={self._min_contracts}")
+                                positionsfilled.append(position)
+                                continue
                             newprice, newamount, newusd, fee, notional = self.updatecostbasis(limitprice, crypt, limit_fill_fee)
                             sutil.simlog("Buy Limit filled — entering long"+
                                          f"<br>&nbsp;&nbsp;&nbsp;Id: {positionid}"+
@@ -600,6 +631,10 @@ class Simulation:
                                              f"<br>&nbsp;&nbsp;&nbsp;USD Balance:${newusd}"
                                              + self.margin_log_suffix(mark))
                             crypt = self._floor_contracts(-(amount / limitprice))
+                            if crypt == 0:
+                                sutil.simlog(f"Sell Limit skipped — computed size below min_contracts={self._min_contracts}")
+                                positionsfilled.append(position)
+                                continue
                             newprice, newamount, newusd, fee, notional = self.updatecostbasis(limitprice, crypt, limit_fill_fee)
                             sutil.simlog("Sell Limit filled — entering short"+
                                          f"<br>&nbsp;&nbsp;&nbsp;Id: {positionid}"+
@@ -621,7 +656,8 @@ class Simulation:
                         if ltp_val > 0:
                             pass
                         elif (cur_pos > 0 and high >= limitprice) or (cur_pos < 0 and low <= limitprice):
-                            close_qty = abs(cur_pos) if amount == 0 else min(self._floor_contracts(amount), abs(cur_pos))
+                            # Exit amount is in CONTRACTS (per CLAUDE.md); 0 means close all
+                            close_qty = abs(cur_pos) if amount == 0 else min(int(abs(amount)), abs(cur_pos))
                             crypt = -close_qty if cur_pos > 0 else close_qty
                             # Long exit limit is above market; short exit limit is below market.
                             # If candle opened past the limit, it crossed immediately → taker fee.
@@ -665,6 +701,10 @@ class Simulation:
                                              f"<br>&nbsp;&nbsp;&nbsp;USD Balance:${newusd}"
                                              + self.margin_log_suffix(mark))
                             crypt = self._floor_contracts(amount / stopprice)
+                            if crypt == 0:
+                                sutil.simlog(f"Buy Stop skipped — computed size below min_contracts={self._min_contracts}")
+                                positionsfilled.append(position)
+                                continue
                             newprice, newamount, newusd, fee, notional = self.updatecostbasis(stopprice, crypt, takerfee)
                             sutil.simlog("Buy Stop filled — entering long"+
                                          f"<br>&nbsp;&nbsp;&nbsp;Id: {positionid}"+
@@ -691,6 +731,10 @@ class Simulation:
                                              f"<br>&nbsp;&nbsp;&nbsp;USD Balance:${newusd}"
                                              + self.margin_log_suffix(mark))
                             crypt = self._floor_contracts(-(amount / stopprice))
+                            if crypt == 0:
+                                sutil.simlog(f"Sell Stop skipped — computed size below min_contracts={self._min_contracts}")
+                                positionsfilled.append(position)
+                                continue
                             newprice, newamount, newusd, fee, notional = self.updatecostbasis(stopprice, crypt, takerfee)
                             sutil.simlog("Sell Stop filled — entering short"+
                                          f"<br>&nbsp;&nbsp;&nbsp;Id: {positionid}"+
@@ -708,7 +752,8 @@ class Simulation:
                         cur_pos = self.namespace['realposition']
                         # Stop-loss: exit long when price drops, exit short when price rises
                         if (cur_pos > 0 and low <= stopprice) or (cur_pos < 0 and high >= stopprice):
-                            close_qty = abs(cur_pos) if amount == 0 else min(self._floor_contracts(amount), abs(cur_pos))
+                            # Exit amount is in CONTRACTS (per CLAUDE.md); 0 means close all
+                            close_qty = abs(cur_pos) if amount == 0 else min(int(abs(amount)), abs(cur_pos))
                             crypt = -close_qty if cur_pos > 0 else close_qty
                             newprice, newamount, newusd, fee, notional = self.updatecostbasis(stopprice, crypt, takerfee)
                             direction = "Long" if cur_pos > 0 else "Short"
@@ -955,6 +1000,9 @@ class Simulation:
                         if pos_amount == 0:
                             pos_amount = self.namespace['usd'] * leverage * 0.99
                         crypt = self._floor_contracts(pos_amount / fill_price)
+                        if crypt == 0:
+                            sutil.simlog(f"Buy Market skipped — computed size below min_contracts={self._min_contracts}")
+                            return True
                         notes = "Buy: entering long"
 
                     elif tradetype_name == util.TradeType.Sell.name:
@@ -977,13 +1025,17 @@ class Simulation:
                         if pos_amount == 0:
                             pos_amount = self.namespace['usd'] * leverage * 0.99
                         crypt = self._floor_contracts(-(pos_amount / fill_price))
+                        if crypt == 0:
+                            sutil.simlog(f"Sell Market skipped — computed size below min_contracts={self._min_contracts}")
+                            return True
                         notes = "Sell: entering short"
 
                     elif tradetype_name == util.TradeType.Exit.name:
                         cur_pos = self.namespace['realposition']
                         if cur_pos == 0:
                             return True
-                        close_qty = abs(cur_pos) if pos_amount == 0 else min(self._floor_contracts(pos_amount), abs(cur_pos))
+                        # Exit amount is in CONTRACTS (per CLAUDE.md); 0 means close all
+                        close_qty = abs(cur_pos) if pos_amount == 0 else min(int(abs(pos_amount)), abs(cur_pos))
                         crypt = -close_qty if cur_pos > 0 else close_qty
                         direction = "long" if cur_pos > 0 else "short"
                         notes = f"Exit: closing {direction} position"
@@ -1038,6 +1090,6 @@ class Simulation:
         final_usd = self.namespace['usd']
         final_pos = self.namespace['realposition']
         pnl = final_usd - self._SimUSDStart
-        sutil.simlog(f"Sim complete — candles:{total} finalUSD:${final_usd:.2f} startUSD:${self._SimUSDStart:.2f} PnL:${pnl:.2f} openContracts:{final_pos:.6f}")
+        sutil.simlog(f"Sim complete — candles:{total} finalUSD:${final_usd:.2f} startUSD:${self._SimUSDStart:.2f} PnL:${pnl:.2f} openContracts:{int(final_pos)}")
         sutil.runupdate("UPDATE exchangesim SET currenttick=?, status=? WHERE id=?", (total, 1, self.simid))
         return True

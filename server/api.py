@@ -127,15 +127,19 @@ async def fetchsim(session: str = Depends(require_session),
                 pass
             fill_idx += 1
         close_price = float(candle['close'])
-        locked = abs(running_contracts) * running_costbasis / sim_leverage
+        # running_contracts is now a signed CONTRACT COUNT; convert to base-asset
+        # exposure using contract_size before applying price to get notional/PnL.
+        cs = sim_contract_size or 0
+        notional = abs(running_contracts) * cs * running_costbasis
+        locked = notional / sim_leverage if sim_leverage else 0
         if running_contracts > 0:
-            upnl = (close_price - running_costbasis) * running_contracts
+            upnl = (close_price - running_costbasis) * running_contracts * cs
         elif running_contracts < 0:
-            upnl = (running_costbasis - close_price) * abs(running_contracts)
+            upnl = (running_costbasis - close_price) * abs(running_contracts) * cs
         else:
             upnl = 0.0
         candle['sim_usd'] = round(running_usd, 2)
-        candle['sim_contracts'] = round(running_contracts, 6)
+        candle['sim_contracts'] = int(running_contracts)
         candle['sim_total_equity'] = round(running_usd + locked + upnl, 2)
 
     response = JSONResponse({
@@ -496,8 +500,14 @@ async def live_account(session: str = Depends(require_session),
         out['price_increment'] = (float(product.get('price_increment') or 0) or
                                   float(product.get('quote_increment') or 0) or None)
         out['product_venue']  = (product.get('product_venue') or '').upper()
-        out['base_currency']  = (product.get('base_currency_id') or product.get('base_name') or '').upper()
         fpd = product.get('future_product_details') or {}
+        # For futures, base_currency_id / base_name are usually blank on the
+        # product payload — the root unit (e.g. "BTC") lives on
+        # future_product_details.contract_root_unit instead.
+        out['base_currency'] = (
+            product.get('base_currency_id') or product.get('base_name') or
+            fpd.get('contract_root_unit') or ''
+        ).upper()
         api_cs = float(fpd.get('contract_size') or 0) or None
         # INTX contract_size from the API is unreliable post-merger; prefer hardcoded.
         known = KNOWN_CONTRACT_SIZES.get(product_id)
@@ -511,6 +521,18 @@ async def live_account(session: str = Depends(require_session),
             out['max_leverage'] = ml
     except Exception as e:
         out['errors']['product'] = str(e)
+
+    # Final fallback for Base: if the product fetch didn't populate it, use
+    # the cached row's contract_root_unit so the field never stays blank when
+    # the product is known locally.
+    if not out['base_currency']:
+        try:
+            row = autil.get_futures_product(product_id) or {}
+            root = (row.get('contract_root_unit') or '').upper()
+            if root:
+                out['base_currency'] = root
+        except Exception:
+            pass
 
     return JSONResponse(out)
 
@@ -586,8 +608,10 @@ async def live_tick_detail(session: str = Depends(require_session),
 
     # Filter live_log lines within the tick's time window.
     # Continuation lines (no timestamp, e.g. traceback lines) are included
-    # if they follow a line that was already accepted.
-    live_log = autil.getkeyval('live_log') or ''
+    # if they follow a line that was already accepted. The log is scoped per
+    # scriptid so switching algorithms doesn't surface the previous script's
+    # log in history.
+    live_log = autil.getkeyval(f'live_log_{scriptid}') or ''
     simlog_lines = []
     in_window = False
     for line in live_log.split('\n'):

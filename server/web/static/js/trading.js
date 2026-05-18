@@ -514,8 +514,8 @@ async function openTickDetail(eventId) {
       html += '<p class="text-muted small">No events found.</p>';
     }
 
-    // Simlog section
-    html += '<h6 class="fw-bold mb-2">Simlog</h6>';
+    // Trade Log section (per-tick excerpt of the live log)
+    html += '<h6 class="fw-bold mb-2">Trade Log</h6>';
     if (data.simlog && data.simlog.length) {
       html += `<pre class="bg-dark text-light p-2 rounded small" style="white-space:pre-wrap;word-break:break-word;">${data.simlog.map(l => escHtml(l)).join('\n')}</pre>`;
     } else {

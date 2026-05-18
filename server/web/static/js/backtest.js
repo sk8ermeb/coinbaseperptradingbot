@@ -322,7 +322,7 @@ function chartmouseposition(param)
       }).replace(',', '');
       const simUsd = candle['sim_usd'] !== undefined ? '$'+candle['sim_usd'].toFixed(2) : '—';
       const simEquity = candle['sim_total_equity'] !== undefined ? '$'+candle['sim_total_equity'].toFixed(2) : '—';
-      const simContracts = candle['sim_contracts'] !== undefined ? candle['sim_contracts'].toFixed(6) : '—';
+      const simContracts = candle['sim_contracts'] !== undefined ? String(candle['sim_contracts']) : '—';
       hout += "<b>Candle</b></br>Time:"+isostr+
         "</br>Open: "+candle['open']+
         "</br>Close:"+candle['close']+
