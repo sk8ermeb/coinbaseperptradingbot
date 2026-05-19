@@ -318,7 +318,10 @@ class LiveTrader:
 
     # ------------------------------------------------------------------ Coinbase account state
 
-    def _read_account_state(self, product_id):
+    def refresh_balance_position(self, product_id, silent=False):
+        """Lightweight refresh: balance_summary + position only. No order
+        reconciliation, no DB writes. Safe to call on every status poll.
+        Set silent=True to skip the live log lines (avoids spam at fast cadence)."""
         cb = CoinbaseHTTP()
 
         # Balance summary — `futures_buying_power` is the actual free margin
@@ -341,6 +344,7 @@ class LiveTrader:
             available      = _amount('available_margin')
             buying_power   = _amount('futures_buying_power')
             unrealized     = _amount('unrealized_pnl')
+            daily_realized = _amount('daily_realized_pnl')
 
             usd_computed = total - initial_margin - hold
             if buying_power > 0:
@@ -354,20 +358,24 @@ class LiveTrader:
             # directly instead of recomputing (the local locked/upnl math used
             # the script's leverage and ignored contract_size — wildly wrong).
             # total_usd_balance is a static snapshot of (spot + futures pool)
-            # cash; it doesn't mark-to-market. Add unrealized_pnl so the
-            # displayed equity moves with price.
+            # cash; it doesn't include today's realized P&L until end-of-day
+            # settlement. Add daily_realized_pnl + unrealized_pnl so the
+            # displayed equity reflects mark-to-market reality immediately.
             self.namespace['unrealized_pnl'] = unrealized
-            self.namespace['total_equity'] = total + unrealized
+            self.namespace['daily_realized_pnl'] = daily_realized
+            self.namespace['total_equity'] = total + daily_realized + unrealized
             self.namespace['initial_margin'] = initial_margin
 
-            self._livelog(
-                f"Free margin: ${self.namespace['usd']:.2f} "
-                f"(futures_buying_power ${buying_power:.2f}; available_margin ${available:.2f}; "
-                f"derived total ${total:.2f} − initial_margin ${initial_margin:.2f} − holds ${hold:.2f} = ${usd_computed:.2f}) "
-                f"| Unrealized PnL: ${unrealized:.2f}"
-            )
+            if not silent:
+                self._livelog(
+                    f"Free margin: ${self.namespace['usd']:.2f} "
+                    f"(futures_buying_power ${buying_power:.2f}; available_margin ${available:.2f}; "
+                    f"derived total ${total:.2f} − initial_margin ${initial_margin:.2f} − holds ${hold:.2f} = ${usd_computed:.2f}) "
+                    f"| Unrealized PnL: ${unrealized:.2f} | Daily Realized PnL: ${daily_realized:.2f}"
+                )
         except Exception:
-            self._livelog(f"Futures balance read error:\n{traceback.format_exc()}")
+            if not silent:
+                self._livelog(f"Futures balance read error:\n{traceback.format_exc()}")
 
         # Open position
         try:
@@ -376,7 +384,8 @@ class LiveTrader:
             if not pos or not pos.get('number_of_contracts'):
                 self.namespace['realposition'] = 0.0
                 self.namespace['costbasis'] = 0.0
-                self._livelog(f"No open position | Free margin: ${self.namespace['usd']:.2f}")
+                if not silent:
+                    self._livelog(f"No open position | Free margin: ${self.namespace['usd']:.2f}")
             else:
                 contracts = float(pos.get('number_of_contracts', 0) or 0)
                 side = pos.get('side', '')
@@ -385,14 +394,20 @@ class LiveTrader:
                 avg_entry = float(pos.get('avg_entry_price', 0) or 0)
                 self.namespace['realposition'] = contracts
                 self.namespace['costbasis'] = avg_entry
-                self._livelog(
-                    f"Position: {contracts} contracts @ {avg_entry:.2f} | "
-                    f"Free margin: ${self.namespace['usd']:.2f}"
-                )
+                if not silent:
+                    self._livelog(
+                        f"Position: {contracts} contracts @ {avg_entry:.2f} | "
+                        f"Free margin: ${self.namespace['usd']:.2f}"
+                    )
         except Exception:
-            self._livelog(f"Position read error:\n{traceback.format_exc()}")
+            if not silent:
+                self._livelog(f"Position read error:\n{traceback.format_exc()}")
             self.namespace['realposition'] = 0.0
             self.namespace['costbasis'] = 0.0
+
+    def _read_account_state(self, product_id):
+        self.refresh_balance_position(product_id, silent=False)
+        cb = CoinbaseHTTP()
 
         # Open orders → pendingpositions
         try:
@@ -806,6 +821,19 @@ class LiveTrader:
         # INTX (or unknown): wire format is base-asset amount
         return str(round(qty, 8))
 
+    def _base_size_to_contracts(self, base_size_str: str) -> float:
+        """Inverse of _format_base_size: turn the wire base_size string back
+        into a contract count for reporting. CDE/FCM already wire it as
+        contracts; INTX wires it as base-asset amount, so divide by contract_size."""
+        try:
+            bs = float(base_size_str)
+        except (TypeError, ValueError):
+            return 0.0
+        if (self._product_venue or '').upper() in ('FCM', 'CDE'):
+            return bs
+        cs = self._contract_size or 0.0
+        return bs / cs if cs > 0 else bs
+
     def _price_decimals(self) -> int:
         """Decimal places implied by price_increment (e.g. 5.0 → 0, 0.01 → 2)."""
         pi = self._price_increment or 0.01
@@ -1172,8 +1200,13 @@ class LiveTrader:
                      limitprice, stopprice, base_size_f, ltp, stp, 'open', int(time.time()),
                      0, 0.0, float(stopprice)))
 
+            # Report the contract count actually placed (after auto-size,
+            # capping, and granularity rounding), not the raw user input.
+            # `base_size` is the venue-formatted string sent to Coinbase for
+            # the main order in every branch that reaches here.
+            placed_contracts = self._base_size_to_contracts(base_size)
             self._log_event('create:' + tradetype.name, {
-                'tradetype': tradetype.name, 'amount': amount,
+                'tradetype': tradetype.name, 'amount': placed_contracts,
                 'limitprice': limitprice, 'stopprice': stopprice,
                 'coinbase_order_id': cb_order_id,
             })
@@ -1225,7 +1258,8 @@ class LiveTrader:
         # used script leverage and ignored contract_size, which is wrong on
         # INTX (e.g. BTC contract = 0.01 BTC, max 3.3x not 10x).
         upnl = self.namespace.get('unrealized_pnl', 0.0)
-        total_equity = self.namespace.get('total_equity', 0.0) or (usd + upnl)
+        dpnl = self.namespace.get('daily_realized_pnl', 0.0)
+        total_equity = self.namespace.get('total_equity', 0.0) or (usd + upnl + dpnl)
         return {
             'running': self.running,
             'scriptid': self.scriptid,

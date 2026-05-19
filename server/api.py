@@ -306,12 +306,16 @@ async def live_status(session: str = Depends(require_session)):
             'close': 0, 'unrealized_pnl': 0, 'total_equity': 0,
             'leverage': 10, 'log': [],
         })
-    # If the trader has stopped, its namespace is frozen at the last tick —
-    # which means a position closed off-tick (e.g. user sold manually) keeps
-    # showing the old contract count. Re-read from Coinbase before returning.
-    if not trader.running and trader.pair:
+    # The trader's namespace only refreshes on candle close (every hour on
+    # ONE_HOUR) and on WS FILLED/CANCELLED events. That leaves balance/position
+    # stale between candles when the user places/cancels orders manually on
+    # the Coinbase UI, or when intraday PnL/holds change. Refresh on every
+    # status poll so the UI always reflects exchange truth. Uses the
+    # lightweight balance+position path (skips order reconciliation, which is
+    # heavy and has DB side effects — that stays on the candle-close path).
+    if trader.pair:
         try:
-            trader._read_account_state(trader.pair)
+            trader.refresh_balance_position(trader.pair, silent=True)
         except Exception:
             pass
     return JSONResponse(trader.get_status())
@@ -367,6 +371,7 @@ async def live_balance(session: str = Depends(require_session)):
         initial_margin = _amount('initial_margin')
         hold = _amount('total_open_orders_hold_amount')
         unrealized = _amount('unrealized_pnl')
+        daily_realized = _amount('daily_realized_pnl')
         available = _amount('available_margin')
         buying_power = _amount('futures_buying_power')
         # `futures_buying_power` matches Coinbase's UI "free margin" exactly.
@@ -379,10 +384,15 @@ async def live_balance(session: str = Depends(require_session)):
             usd = available
         else:
             usd = max(usd_computed, 0)
+        # total_usd_balance is a static snapshot that doesn't include today's
+        # realized P&L until end-of-day settlement, so add daily_realized_pnl
+        # (signed) and unrealized_pnl to get the true mark-to-market equity.
+        equity_base = total + daily_realized + unrealized if total else usd
         return JSONResponse({
             'usd': round(usd, 2),
-            'total_equity': round((total + unrealized) if total else usd, 2),
+            'total_equity': round(equity_base, 2),
             'unrealized_pnl': round(unrealized, 2),
+            'daily_realized_pnl': round(daily_realized, 2),
             'initial_margin': round(initial_margin, 2),
             'open_orders_hold': round(hold, 2),
             'available_margin_raw': round(available, 2),
@@ -447,6 +457,7 @@ async def live_account(session: str = Depends(require_session),
         initial_margin = _amt('initial_margin')
         hold = _amt('total_open_orders_hold_amount')
         unrealized = _amt('unrealized_pnl')
+        daily_realized = _amt('daily_realized_pnl')
         available = _amt('available_margin')
         buying_power = _amt('futures_buying_power')
         usd_computed = total - initial_margin - hold
@@ -459,12 +470,14 @@ async def live_account(session: str = Depends(require_session),
             out['usd'] = round(available, 2)
         else:
             out['usd'] = round(max(usd_computed, 0), 2)
-        # total_usd_balance is static (spot + futures pool cash, no mark-to-market).
-        # Add unrealized_pnl so the displayed equity moves with price.
-        out['total_equity']      = round(total + unrealized, 2)
-        out['unrealized_pnl']    = round(unrealized, 2)
-        out['initial_margin']    = round(initial_margin, 2)
-        out['open_orders_hold']  = round(hold, 2)
+        # total_usd_balance is a static snapshot that excludes today's realized
+        # P&L until end-of-day settlement, so include daily_realized_pnl and
+        # unrealized_pnl to get the true mark-to-market equity.
+        out['total_equity']        = round(total + daily_realized + unrealized, 2)
+        out['unrealized_pnl']      = round(unrealized, 2)
+        out['daily_realized_pnl']  = round(daily_realized, 2)
+        out['initial_margin']      = round(initial_margin, 2)
+        out['open_orders_hold']    = round(hold, 2)
     except Exception as e:
         out['errors']['balance'] = str(e)
 
