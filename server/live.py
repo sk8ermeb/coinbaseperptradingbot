@@ -28,6 +28,14 @@ class LiveTrader:
         self.namespace = {}
         self.historysize = 1000
         self.pair = 'btc'
+        # Serializes trail updates triggered from the API price-poll thread
+        # so they don't race with each other (or with any internal callers).
+        self._trail_lock = threading.Lock()
+        # Latest market mid cached by the backend's 5s poll. The /api/live/price
+        # endpoint reads from here so the frontend doesn't have to hit Coinbase
+        # itself when the trader thread is already polling.
+        self._last_price = 0.0
+        self._last_price_time = 0.0
         self.granularity = 'ONE_HOUR'
         self.candle_history = []
         self._ind_history = {}
@@ -148,9 +156,24 @@ class LiveTrader:
             wait = next_close - now
             self._livelog(f"Next candle close in {wait:.0f}s")
 
+            # Inter-candle wait. While we sleep, poll the ticker on a 5s
+            # cadence and run trailing-stop updates against fresh market
+            # prices — Coinbase has no native trailing support, so this
+            # thread is what keeps the trail moving between candle closes
+            # (and it runs whether or not anyone has the trading page open).
+            # self.running flips False on stop(), so the loop exits within
+            # one chunk.
             deadline = time.time() + wait
+            poll_interval = 5
+            next_poll = time.time()
             while time.time() < deadline and self.running:
-                time.sleep(min(10, deadline - time.time()))
+                now = time.time()
+                if now >= next_poll:
+                    self._poll_market_tick(product_id)
+                    next_poll = time.time() + poll_interval
+                chunk = min(poll_interval, deadline - time.time())
+                if chunk > 0:
+                    time.sleep(chunk)
             if not self.running:
                 break
 
@@ -171,9 +194,6 @@ class LiveTrader:
 
             self._livelog(f"Candle O:{candle['open']} H:{candle['high']} L:{candle['low']} C:{candle['close']}")
 
-            # Update trailing orders before reading state
-            self._update_trailing_orders(product_id, float(candle['close']))
-
             try:
                 self._read_account_state(product_id)
             except Exception:
@@ -190,6 +210,8 @@ class LiveTrader:
                     'amount': order.amount,
                     'limitprice': order.limitprice,
                     'stopprice': order.stopprice,
+                    'limittrailpercent': order.limittrailpercent,
+                    'stoptrailpercent': order.stoptrailpercent,
                 })
                 self._execute_order(order, product_id, float(candle['close']))
 
@@ -419,8 +441,7 @@ class LiveTrader:
             # (the old "missing from OPEN list = filled" assumption misclassified
             # exchange-side cancels and expirations as fills).
             tracked = lutil.runselect(
-                "SELECT id, coinbase_order_id, tradetype, amount, limitprice, stopprice "
-                "FROM liveorder WHERE scriptid=? AND status='open'",
+                "SELECT * FROM liveorder WHERE scriptid=? AND status='open'",
                 (self.scriptid,))
             for row in tracked:
                 cb_id = row['coinbase_order_id']
@@ -441,6 +462,8 @@ class LiveTrader:
                     'amount': row['amount'] or 0,
                     'limitprice': row['limitprice'] or 0,
                     'stopprice': row['stopprice'] or 0,
+                    'limittrailpercent': row['limittrailpercent'] or 0,
+                    'stoptrailpercent': row['stoptrailpercent'] or 0,
                     'status': status,
                     'filled_size': float(order.get('filled_size', 0) or 0),
                     'average_filled_price': float(order.get('average_filled_price', 0) or 0),
@@ -462,6 +485,16 @@ class LiveTrader:
                     self._log_event('fail:' + tt, evt)
                 else:
                     self._livelog(f"Order {cb_id} unknown status '{status}' — leaving open")
+
+            # Look up the local liveorder rows so we can surface trail
+            # percents in pendingpositions AND include pending-trail rows
+            # (no Coinbase order yet) so the script's `not pendingpositions`
+            # gate doesn't double-issue them on the next tick.
+            local_rows = lutil.runselect(
+                "SELECT * FROM liveorder WHERE scriptid=? AND status='open'",
+                (self.scriptid,))
+            local_by_id = {r['coinbase_order_id']: r
+                           for r in local_rows if r['coinbase_order_id']}
 
             pending = []
             for o in orders_list:
@@ -489,154 +522,282 @@ class LiveTrader:
                     ordertype = 'Limit'
                 else:
                     ordertype = 'Market'
+                local = local_by_id.get(o.get('order_id', ''))
+                ltp_local = float(local['limittrailpercent'] or 0) if local else 0.0
+                stp_local = float(local['stoptrailpercent'] or 0) if local else 0.0
+                # For a trailing Exit, Coinbase only has the hard stop on file
+                # (the limit is a local activation threshold) — surface the
+                # threshold to the script so it can see the full picture.
+                if local and local['tradetype'] == 'Exit' and ltp_local > 0 and local['limitprice']:
+                    lp = float(local['limitprice'])
+                # Prefer the local tradetype (Buy/Sell/Exit) over the side-
+                # based guess so Exit orders aren't mis-labeled as Sell/Buy.
+                tradetype = local['tradetype'] if local else (
+                    'Buy' if o.get('side') == 'BUY' else 'Sell')
                 pending.append({
                     'id': o.get('order_id', ''),
                     'ordertype': ordertype,
                     'price': lp, 'amount': float(o.get('base_size', 0) or 0),
                     'stopprice': sp, 'limitprice': lp,
-                    'limittrailpercent': 0, 'stoptrailpercent': 0,
-                    'tradetype': 'Buy' if o.get('side') == 'BUY' else 'Sell',
+                    'limittrailpercent': ltp_local, 'stoptrailpercent': stp_local,
+                    'tradetype': tradetype,
                 })
+
+            # Also include pending-trail rows that aren't on the exchange
+            # yet. Without this, the script sees pendingpositions empty
+            # and would issue another Exit on the next tick.
+            exchange_ids = {o.get('order_id', '') for o in orders_list}
+            for r in local_rows:
+                cb_id = r['coinbase_order_id'] or ''
+                if cb_id and cb_id in exchange_ids:
+                    continue  # already represented above
+                ltp_l = float(r['limittrailpercent'] or 0)
+                lp_l = float(r['limitprice'] or 0)
+                sp_l = float(r['stopprice'] or 0)
+                ordertype = ('TrailPending' if ltp_l > 0 and lp_l > 0
+                             else 'Internal')
+                pending.append({
+                    'id': r['internal_id'] or cb_id,
+                    'ordertype': ordertype,
+                    'price': lp_l, 'amount': float(r['amount'] or 0),
+                    'stopprice': sp_l, 'limitprice': lp_l,
+                    'limittrailpercent': ltp_l,
+                    'stoptrailpercent': float(r['stoptrailpercent'] or 0),
+                    'tradetype': r['tradetype'],
+                })
+
             self.namespace['pendingpositions'] = pending
         except Exception:
             self._livelog(f"Open orders read error:\n{traceback.format_exc()}")
 
     # ------------------------------------------------------------------ trailing order management
 
-    def _update_trailing_orders(self, product_id, close_price):
-        """For each tracked liveorder with a trail percent, cancel+replace if price moved enough."""
+    def _poll_market_tick(self, product_id):
+        """Background market poll run by the LiveTrader thread between candle
+        closes. Fetches the latest mid from Coinbase, caches it for the
+        frontend's /api/live/price endpoint, and runs any pending trail
+        updates. Errors are deduped so a flaky ticker doesn't spam the log
+        every 5 seconds."""
+        try:
+            cb = CoinbaseHTTP()
+            product = cb.get_product(product_id)
+            bid = float(product.get('best_bid_price') or 0)
+            ask = float(product.get('best_ask_price') or 0)
+            if bid > 0 and ask > 0:
+                price = (bid + ask) / 2
+            elif bid > 0:
+                price = bid
+            elif ask > 0:
+                price = ask
+            else:
+                price = float(product.get('price') or 0)
+            if price > 0:
+                # Publish to the shared cache before doing the trail work so
+                # /api/live/price can return immediately even mid-trail.
+                self._last_price = price
+                self._last_price_time = time.time()
+                # Cheap pre-check: skip the trail lock dance entirely when
+                # no rows have a trail percent set.
+                rows = lutil.runselect(
+                    "SELECT 1 FROM liveorder WHERE scriptid=? AND status='open' "
+                    "AND limittrailpercent > 0 LIMIT 1",
+                    (self.scriptid,))
+                if rows:
+                    self.update_trailing(price)
+            self._last_market_poll_error = None
+        except Exception as e:
+            # Suppress repeated identical errors so one bad ticker call
+            # doesn't fill the log with 720 lines/hour.
+            msg = str(e)
+            if getattr(self, '_last_market_poll_error', None) != msg:
+                self._livelog(f"Market poll fetch failed: {msg}")
+                self._last_market_poll_error = msg
+
+    def update_trailing(self, price):
+        """Re-evaluate trailing orders against a fresh market price. Called
+        from the price-poll API path on every market update so trails track
+        intra-candle moves instead of only updating at candle close. Skips
+        cleanly if the trader isn't fully started or another update is
+        already in flight (the next poll picks up the slack)."""
+        if not self.running or not self.pair:
+            return
+        try:
+            price = float(price)
+        except (TypeError, ValueError):
+            return
+        if price <= 0:
+            return
+        if not self._trail_lock.acquire(blocking=False):
+            return
+        try:
+            self._update_trailing_orders(self.pair, price)
+        except Exception:
+            self._livelog(f"Trail update error:\n{traceback.format_exc()}")
+        finally:
+            self._trail_lock.release()
+
+    def _trail_direction(self, tradetype, pos):
+        """Resolve a trail row to one of two symmetric mechanics.
+
+        Returns (kind, cb_side, stop_dir):
+          kind='upside'   → peak tracks the HIGH, stop = peak*(1-ltp),
+                            placed as a SELL stop_limit / STOP_DOWN.
+                            Used for Long Exit and Sell Entry.
+          kind='downside' → peak tracks the LOW, stop = peak*(1+ltp),
+                            placed as a BUY  stop_limit / STOP_UP.
+                            Used for Short Exit and Buy Entry.
+        Returns None if the (tradetype, pos) combo can't run a trail
+        (Exit with no position is the only realistic case)."""
+        if tradetype == 'Exit':
+            if pos > 0:
+                return ('upside', 'SELL', 'STOP_DIRECTION_STOP_DOWN')
+            if pos < 0:
+                return ('downside', 'BUY', 'STOP_DIRECTION_STOP_UP')
+            return None
+        if tradetype == 'Sell':
+            return ('upside', 'SELL', 'STOP_DIRECTION_STOP_DOWN')
+        if tradetype == 'Buy':
+            return ('downside', 'BUY', 'STOP_DIRECTION_STOP_UP')
+        return None
+
+    def _update_trailing_orders(self, product_id, price):
+        """Re-evaluate every open trailing liveorder against the current
+        market `price` and cancel+replace the exchange order whenever the
+        trail moves. Runs on each backend market poll (5s) and on the
+        frontend /api/live/price path.
+
+        Trail design (see _trail_direction for the symmetric pairing):
+          • Pre-activation: do nothing on the exchange side (any initial
+            hard stop placed by _execute_order just sits there).
+          • Activation fires when price crosses the stored `limitprice`
+            in the favorable direction.
+          • Post-activation: track `peak` (HIGH for upside, LOW for
+            downside), set stop = peak*(1∓ltp), and only move the stop
+            monotonically (up for upside, down for downside). The original
+            hard stop is intentionally NOT used as a floor after
+            activation."""
         rows = lutil.runselect(
-            "SELECT * FROM liveorder WHERE scriptid=? AND status='open'", (self.scriptid,))
+            "SELECT * FROM liveorder WHERE scriptid=? AND status='open' "
+            "AND limittrailpercent > 0",
+            (self.scriptid,))
         if not rows:
             return
         cb = CoinbaseHTTP()
+        pos = self.namespace.get('realposition', 0)
 
         for row in rows:
-            ltp = row['limittrailpercent']
-            stp = row['stoptrailpercent']
+            ltp = row['limittrailpercent'] or 0
             tradetype = row['tradetype']
-            updated = False
-            new_limit = row['limitprice']
-            new_stop = row['stopprice']
+            activation = float(row['limitprice'] or 0)
+            if ltp <= 0 or activation <= 0:
+                continue
 
-            if ltp and ltp > 0 and row['limitprice'] > 0:
-                cur_limit = row['limitprice']
-                if tradetype == 'Buy':
-                    candidate = close_price * (1.0 - ltp)
-                    if candidate > cur_limit:
-                        new_limit = candidate
-                        updated = True
-                elif tradetype == 'Sell':
-                    candidate = close_price * (1.0 + ltp)
-                    if candidate < cur_limit:
-                        new_limit = candidate
-                        updated = True
-                elif tradetype == 'Exit':
-                    pos = self.namespace.get('realposition', 0)
-                    activated = bool(row.get('activated', 0))
-                    peak = float(row.get('peak_price', 0))
-                    hard_stop = float(row.get('hard_stopprice', 0))
+            direction = self._trail_direction(tradetype, pos)
+            if direction is None:
+                continue
+            kind, cb_side, stop_dir = direction
+            upside = (kind == 'upside')
 
-                    if pos > 0:
-                        if not activated and close_price >= cur_limit:
-                            activated = True
-                            peak = close_price
-                            self._livelog(f"Trailing stop activated (long) at {close_price:.2f}")
-                            lutil.runupdate(
-                                "UPDATE liveorder SET activated=1, peak_price=? WHERE id=?",
-                                (peak, row['id']))
-                        if activated:
-                            if close_price > peak:
-                                peak = close_price
-                                lutil.runupdate("UPDATE liveorder SET peak_price=? WHERE id=?", (peak, row['id']))
-                            trail_stop = peak * (1.0 - ltp)
-                            if hard_stop > 0:
-                                trail_stop = max(trail_stop, hard_stop)
-                            if trail_stop != new_stop:
-                                new_stop = trail_stop
-                                updated = True
-                    elif pos < 0:
-                        if not activated and close_price <= cur_limit:
-                            activated = True
-                            peak = close_price
-                            self._livelog(f"Trailing stop activated (short) at {close_price:.2f}")
-                            lutil.runupdate(
-                                "UPDATE liveorder SET activated=1, peak_price=? WHERE id=?",
-                                (peak, row['id']))
-                        if activated:
-                            if peak == 0 or close_price < peak:
-                                peak = close_price
-                                lutil.runupdate("UPDATE liveorder SET peak_price=? WHERE id=?", (peak, row['id']))
-                            trail_stop = peak * (1.0 + ltp)
-                            if hard_stop > 0:
-                                trail_stop = min(trail_stop, hard_stop)
-                            if trail_stop != new_stop:
-                                new_stop = trail_stop
-                                updated = True
+            activated = bool(row.get('activated', 0))
+            peak = float(row.get('peak_price', 0))
+            cur_stop = float(row['stopprice'] or 0)
 
-            if stp and stp > 0 and row['stopprice'] > 0:
-                cur = row['stopprice']
-                if tradetype == 'Exit':
-                    pos = self.namespace.get('realposition', 0)
-                    if pos > 0:
-                        candidate = close_price * (1.0 - stp)
-                        if candidate > cur:
-                            new_stop = candidate
-                            updated = True
-                    elif pos < 0:
-                        candidate = close_price * (1.0 + stp)
-                        if candidate < cur:
-                            new_stop = candidate
-                            updated = True
+            # Activation check.
+            if not activated:
+                triggered = (upside and price >= activation) or \
+                            (not upside and price <= activation)
+                if not triggered:
+                    continue
+                activated = True
+                peak = price
+                lutil.runupdate(
+                    "UPDATE liveorder SET activated=1, peak_price=? WHERE id=?",
+                    (peak, row['id']))
+                self._livelog(
+                    f"Trail activated [{tradetype}] at {price:.2f} "
+                    f"(activation@{activation:.2f}, trail:{ltp*100:.2f}%)"
+                )
 
-            if updated:
-                # Step 1: cancel existing order — abort replacement if cancel fails
-                if row['coinbase_order_id']:
-                    try:
-                        cb.cancel_orders([row['coinbase_order_id']])
-                    except Exception:
-                        self._livelog(f"Trailing cancel failed for {row['coinbase_order_id']} — skipping replace:\n{traceback.format_exc()}")
-                        continue
+            # Peak update (monotonic in the favorable direction).
+            if upside:
+                if price > peak:
+                    peak = price
+                    lutil.runupdate("UPDATE liveorder SET peak_price=? WHERE id=?",
+                                    (peak, row['id']))
+                new_stop = peak * (1.0 - ltp)
+            else:
+                if peak == 0 or price < peak:
+                    peak = price
+                    lutil.runupdate("UPDATE liveorder SET peak_price=? WHERE id=?",
+                                    (peak, row['id']))
+                new_stop = peak * (1.0 + ltp)
 
-                # Step 2: place replacement order
+            # Decide whether the exchange order needs to be (re)placed.
+            # Compare on tick-quantized prices so a sub-tick drift in `peak`
+            # doesn't churn cancel+replace cycles that wouldn't change the
+            # order on Coinbase.
+            first_placement = not bool(row['coinbase_order_id'])
+            pi = self._price_increment or 0.01
+            new_ticks = round(new_stop / pi)
+            cur_ticks = round(cur_stop / pi) if cur_stop > 0 else 0
+            if first_placement:
+                needs_place = True
+            elif upside:
+                needs_place = new_ticks > cur_ticks
+            else:
+                needs_place = new_ticks < cur_ticks
+            if not needs_place:
+                continue
+
+            # Cancel existing exchange order (skipped on first placement).
+            # If the existing order is the case-4 hard stop, this cancel
+            # leaves the position briefly unprotected for ~2-5s before
+            # the new trailing stop lands — accepted tradeoff.
+            if row['coinbase_order_id']:
                 try:
-                    new_cb_id = str(uuid.uuid4())
-                    base_size = self._format_base_size(self._round_to_increment(float(row['amount'])))
-                    pos = self.namespace.get('realposition', 0)
-                    if new_stop > 0:
-                        stop_direction = 'STOP_DIRECTION_STOP_DOWN' if pos > 0 else 'STOP_DIRECTION_STOP_UP'
-                        side = 'SELL' if pos > 0 else 'BUY'
-                        intent = f"TRAILING {side} stop {base_size} @ {new_stop:.2f}"
-                        resp = self._cb_create_order(cb, new_cb_id, product_id, side, {
-                            'stop_limit_stop_limit_gtc': {
-                                'base_size': base_size,
-                                'limit_price': self._format_stop_limit_price(new_stop, side),
-                                'stop_price': self._format_price(new_stop),
-                                'stop_direction': stop_direction,
-                            }
-                        })
-                        if not self._check_order_response(resp, intent): continue
-                        new_cb_id = self._get_cb_order_id(resp, new_cb_id, product_id) or new_cb_id
-                    elif tradetype == 'Buy':
-                        intent = f"TRAILING BUY limit {base_size} @ {new_limit:.2f}"
-                        resp = self._cb_create_order(cb, new_cb_id, product_id, 'BUY', {
-                            'limit_limit_gtc': {'base_size': base_size, 'limit_price': self._format_price(new_limit)}
-                        })
-                        if not self._check_order_response(resp, intent): continue
-                        new_cb_id = self._get_cb_order_id(resp, new_cb_id, product_id) or new_cb_id
-                    elif tradetype in ('Sell', 'Exit'):
-                        intent = f"TRAILING SELL limit {base_size} @ {new_limit:.2f}"
-                        resp = self._cb_create_order(cb, new_cb_id, product_id, 'SELL', {
-                            'limit_limit_gtc': {'base_size': base_size, 'limit_price': self._format_price(new_limit)}
-                        })
-                        if not self._check_order_response(resp, intent): continue
-                        new_cb_id = self._get_cb_order_id(resp, new_cb_id, product_id) or new_cb_id
-                    lutil.runupdate(
-                        "UPDATE liveorder SET coinbase_order_id=?, limitprice=?, stopprice=? WHERE id=?",
-                        (new_cb_id, new_limit, new_stop, row['id']))
-                    self._livelog(f"Trailing update [{tradetype}]: stop {row['stopprice']:.2f}→{new_stop:.2f}")
+                    cb.cancel_orders([row['coinbase_order_id']])
                 except Exception:
-                    self._livelog(f"Trailing replace error:\n{traceback.format_exc()}")
+                    self._livelog(
+                        f"Trail cancel failed for {row['coinbase_order_id']} "
+                        f"— skipping replace:\n{traceback.format_exc()}"
+                    )
+                    continue
+
+            # Place the new stop_limit.
+            new_cb_id = str(uuid.uuid4())
+            base_size = self._format_base_size(self._round_to_increment(float(row['amount'])))
+            intent = (f"TRAIL {cb_side} stop_limit {base_size} @ {new_stop:.2f} "
+                      f"[{tradetype} peak {peak:.2f} trail:{ltp*100:.2f}%]")
+            try:
+                resp = self._cb_create_order(cb, new_cb_id, product_id, cb_side, {
+                    'stop_limit_stop_limit_gtc': {
+                        'base_size': base_size,
+                        'limit_price': self._format_stop_limit_price(new_stop, cb_side),
+                        'stop_price': self._format_price(new_stop),
+                        'stop_direction': stop_dir,
+                    }
+                })
+            except Exception:
+                self._livelog(f"Trail place error:\n{traceback.format_exc()}")
+                continue
+            if not self._check_order_response(resp, intent):
+                continue
+            new_cb_id = self._get_cb_order_id(resp, new_cb_id, product_id) or new_cb_id
+
+            lutil.runupdate(
+                "UPDATE liveorder SET coinbase_order_id=?, stopprice=? WHERE id=?",
+                (new_cb_id, new_stop, row['id']))
+            self._livelog(intent)
+            self._log_event('trail:' + tradetype, {
+                'coinbase_order_id': new_cb_id,
+                'tradetype': tradetype,
+                'old_stopprice': cur_stop,
+                'new_stopprice': float(new_stop),
+                'peak_price': float(peak),
+                'limittrailpercent': float(ltp),
+                'market_price': float(price),
+                'first_placement': first_placement,
+            })
 
     # ------------------------------------------------------------------ product limits
 
@@ -955,22 +1116,103 @@ class LiveTrader:
     # ------------------------------------------------------------------ cancel order
 
     def _cancel_order(self, order_id):
+        # Issue the cancel and BLOCK until Coinbase confirms the order has
+        # left OPEN status. Only then update local state. This protects the
+        # script from racing — without it, the script sees pendingpositions
+        # empty immediately and may place a new order while the old one is
+        # still live on the exchange.
+        #
+        # `order_id` may be either a Coinbase order_id (exchange-backed
+        # order) or our internal_id (pending-trail row with no Coinbase
+        # order yet); pendingpositions exposes whichever exists.
         cb = CoinbaseHTTP()
-        row = lutil.runselect(
-            "SELECT tradetype FROM liveorder WHERE coinbase_order_id=? AND scriptid=?",
-            (order_id, self.scriptid))
-        tradetype_name = row[0]['tradetype'] if row else 'order'
+        rows = lutil.runselect(
+            "SELECT * FROM liveorder "
+            "WHERE (coinbase_order_id=? OR internal_id=?) AND scriptid=?",
+            (order_id, order_id, self.scriptid))
+        if not rows:
+            self._livelog(f"cancel_order: no liveorder row matches {order_id}")
+            return
+        row = rows[0]
+        tradetype_name = row['tradetype'] or 'order'
+        cb_id = row['coinbase_order_id'] or ''
+        internal_id = row['internal_id'] or ''
+
+        # Pending-trail row: nothing on Coinbase to cancel. Just clear the
+        # local tracking and emit the event.
+        if not cb_id:
+            positions = self.namespace.get('pendingpositions', [])
+            self.namespace['pendingpositions'] = [
+                p for p in positions
+                if p.get('id') not in (order_id, internal_id)
+            ]
+            lutil.runupdate(
+                "UPDATE liveorder SET status='cancelled' WHERE id=?",
+                (row['id'],))
+            self._log_event('cancel:' + tradetype_name, {
+                'coinbase_order_id': '',
+                'internal_id': internal_id,
+                'final_status': 'CANCELLED',
+                'pending_trail': True,
+            })
+            self._livelog(f"Cancelled pending-trail order {internal_id}")
+            return
+
+        order_id = cb_id  # use the real Coinbase id from here on
         try:
-            cb.cancel_orders([order_id])
-            self._livelog(f"Cancelled order {order_id}")
+            resp = cb.cancel_orders([order_id])
         except Exception:
-            self._livelog(f"cancel_order error:\n{traceback.format_exc()}")
+            self._livelog(f"cancel_order request error for {order_id}:\n{traceback.format_exc()}")
+            return
+
+        results = resp.get('results', []) if isinstance(resp, dict) else []
+        first = results[0] if results else {}
+        if not first.get('success'):
+            reason = first.get('failure_reason') or 'no response'
+            self._livelog(f"cancel_order {order_id} rejected by exchange: {reason} — local state unchanged")
+            return
+        self._livelog(f"Cancel sent for {order_id} — awaiting exchange confirmation")
+
+        # Poll until the order is no longer OPEN/PENDING on Coinbase. Use
+        # list_orders(OPEN) so confirmation matches what the script sees in
+        # pendingpositions (which is built from the same call).
+        final_status = None
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            try:
+                data = cb.list_orders(order_status=['OPEN'], product_type='FUTURE', limit=100)
+                open_orders = data.get('orders', []) or []
+                if not any((o.get('order_id') or '') == order_id for o in open_orders):
+                    # Order has left the open list — get its terminal status.
+                    try:
+                        od = cb.get_order(order_id).get('order') or {}
+                        final_status = (od.get('status') or 'CANCELLED').upper()
+                    except Exception:
+                        final_status = 'CANCELLED'
+                    break
+            except Exception:
+                self._livelog(f"Cancel confirm poll error for {order_id}:\n{traceback.format_exc()}")
+            time.sleep(0.5)
+
+        if final_status is None:
+            self._livelog(
+                f"Cancel {order_id}: not confirmed gone from open orders within 10s — "
+                "local state unchanged (will retry on next tick)"
+            )
+            return
+
+        self._livelog(f"Cancel {order_id} confirmed: status={final_status}")
         positions = self.namespace.get('pendingpositions', [])
         self.namespace['pendingpositions'] = [p for p in positions if p['id'] != order_id]
-        lutil.runupdate(
-            "UPDATE liveorder SET status='cancelled' WHERE coinbase_order_id=? AND scriptid=?",
-            (order_id, self.scriptid))
-        self._log_event('cancel:' + tradetype_name, {'coinbase_order_id': order_id})
+        # Only mark cancelled in the DB if Coinbase actually cancelled — if
+        # the order filled in the race, the WS/reconciliation path owns the
+        # status update.
+        if final_status == 'CANCELLED':
+            lutil.runupdate(
+                "UPDATE liveorder SET status='cancelled' WHERE coinbase_order_id=? AND scriptid=?",
+                (order_id, self.scriptid))
+        self._log_event('cancel:' + tradetype_name,
+                        {'coinbase_order_id': order_id, 'final_status': final_status})
 
     # ------------------------------------------------------------------ order execution
 
@@ -983,6 +1225,15 @@ class LiveTrader:
         stopprice = trade_order.stopprice
         ltp = trade_order.limittrailpercent
         stp = trade_order.stoptrailpercent
+        # stoptrailpercent is deprecated. The trail model is driven entirely
+        # by limittrailpercent + an activation threshold (lp). Warn and drop
+        # so the order proceeds with whatever other fields are set.
+        if stp and stp > 0:
+            self._livelog(
+                f"Warning: stoptrailpercent={stp} is deprecated and ignored. "
+                "Use limittrailpercent with a limit price as the activation."
+            )
+            stp = 0
 
         leverage = self.namespace.get('leverage', 10)
         realposition = self.namespace.get('realposition', 0.0)
@@ -1027,9 +1278,58 @@ class LiveTrader:
                 base_size = self._format_base_size(close_qty)
                 side = 'SELL' if pos > 0 else 'BUY'
                 action = 'sell' if pos > 0 else 'buy'
-                if limitprice > 0 and stopprice > 0:
-                    # TP+SL bracket (Coinbase calls this "TP/SL" in the UI). One
-                    # of the two triggers fills, the other is auto-cancelled.
+                if ltp > 0:
+                    # Trailing exit. Cases:
+                    #   4: sp > 0, lp > 0 — hard stop_limit @ sp on exchange,
+                    #      lp held locally as activation threshold.
+                    #   5: sp == 0, lp > 0 — nothing on exchange yet.
+                    #   6: sp == 0, lp == 0 — synthesize activation from
+                    #      costbasis: long → costbasis*(1+ltp),
+                    #      short → costbasis*(1-ltp). Nothing on exchange.
+                    activation = limitprice
+                    if activation == 0:
+                        costbasis = self.namespace.get('costbasis', 0)
+                        if costbasis <= 0:
+                            self._livelog(
+                                "Exit trailing with no limit price: costbasis "
+                                "unknown — cannot synthesize activation."
+                            )
+                            return
+                        activation = (costbasis * (1.0 + ltp) if pos > 0
+                                      else costbasis * (1.0 - ltp))
+                        self._livelog(
+                            f"Exit trailing: synthesized activation @ "
+                            f"{activation:.2f} (costbasis {costbasis:.2f} "
+                            f"{'+' if pos > 0 else '-'} {ltp*100:.2f}%)"
+                        )
+                    if stopprice > 0:
+                        # Case 4: place initial hard stop, lp is local
+                        stop_dir = ('STOP_DIRECTION_STOP_DOWN' if pos > 0
+                                    else 'STOP_DIRECTION_STOP_UP')
+                        intent = (f"EXIT trailing {action} {base_size} "
+                                  f"hard-stop@{stopprice} "
+                                  f"activate@{activation:.2f} trail:{ltp}")
+                        resp = self._cb_create_order(cb, order_id, product_id, side, {
+                            'stop_limit_stop_limit_gtc': {
+                                'base_size': base_size,
+                                'limit_price': self._format_stop_limit_price(stopprice, side),
+                                'stop_price': self._format_price(stopprice),
+                                'stop_direction': stop_dir,
+                            }
+                        })
+                        if not self._check_order_response(resp, intent): return
+                        cb_order_id = self._get_cb_order_id(resp, order_id, product_id)
+                        self._livelog(intent)
+                    else:
+                        # Case 5/6: nothing on exchange until activation
+                        intent = (f"EXIT trailing-pending {action} {base_size} "
+                                  f"activate@{activation:.2f} trail:{ltp}")
+                        self._livelog(intent)
+                    # Persist the (possibly synthesized) activation as
+                    # limitprice for the trail loop to read.
+                    limitprice = activation
+                elif limitprice > 0 and stopprice > 0:
+                    # Bracket TP/SL.
                     intent = f"EXIT bracket {action} {base_size} TP@{limitprice} SL@{stopprice}"
                     resp = self._cb_create_order(cb, order_id, product_id, side, {
                         'trigger_bracket_gtc': {
@@ -1084,7 +1384,63 @@ class LiveTrader:
                     self._livelog(f"BUY: closed short {base_size} at market")
                     realposition = 0.0
 
-                if limitprice > 0:
+                if ltp > 0:
+                    # Buy trailing entry. Activation: price <= lp (market
+                    # falls into the buy zone). After activation the trail
+                    # tracks the LOW; we place a BUY stop at peak*(1+ltp)
+                    # so a bounce off the low fires the entry. sp is ignored
+                    # — entries don't have a "stop loss" before opening.
+                    if stopprice > 0:
+                        self._livelog(
+                            f"Buy trailing: stop price {stopprice} ignored "
+                            "(entries use only lp + ltp)"
+                        )
+                        stopprice = 0
+                    activation = limitprice
+                    if activation == 0:
+                        # Case B6: synthesize activation = current market so
+                        # the trail kicks in immediately on the next poll.
+                        activation = (self._last_price
+                                      or float(close_price or 0))
+                        if activation <= 0:
+                            self._livelog(
+                                "Buy trailing with no limit price: no "
+                                "market price available — skipping"
+                            )
+                            return
+                        self._livelog(
+                            f"Buy trailing: synthesized activation @ "
+                            f"{activation:.2f} (current market)"
+                        )
+                    bs = self._cap_base_size(round(amount_notional / activation, 8),
+                                             intent_label=f"BUY trailing-pending @ {activation:.2f}")
+                    if bs <= 0: return
+                    base_size = self._format_base_size(bs)
+                    intent = (f"BUY trailing-pending {base_size} "
+                              f"activate@{activation:.2f} trail:{ltp}")
+                    self._livelog(intent)
+                    # cb_order_id stays None; trail loop places the first
+                    # exchange order at activation.
+                    limitprice = activation
+                elif limitprice > 0 and stopprice > 0:
+                    # Bracket entry — either limit (buy on dip) or stop
+                    # (buy on breakout) fires; the other auto-cancels.
+                    bs = self._cap_base_size(round(amount_notional / limitprice, 8),
+                                             intent_label=f"BUY bracket TP@{limitprice} SL@{stopprice}")
+                    if bs <= 0: return
+                    base_size = self._format_base_size(bs)
+                    intent = f"BUY bracket {base_size} TP@{limitprice} SL@{stopprice}"
+                    resp = self._cb_create_order(cb, order_id, product_id, 'BUY', {
+                        'trigger_bracket_gtc': {
+                            'base_size': base_size,
+                            'limit_price': self._format_price(limitprice),
+                            'stop_trigger_price': self._format_price(stopprice),
+                        }
+                    })
+                    if not self._check_order_response(resp, intent): return
+                    cb_order_id = self._get_cb_order_id(resp, order_id, product_id)
+                    self._livelog(intent)
+                elif limitprice > 0:
                     bs = self._cap_base_size(round(amount_notional / limitprice, 8),
                                              intent_label=f"BUY limit @ {limitprice}")
                     if bs <= 0: return
@@ -1139,7 +1495,58 @@ class LiveTrader:
                     self._livelog(f"SELL: closed long {base_size} at market")
                     realposition = 0.0
 
-                if limitprice > 0:
+                if ltp > 0:
+                    # Sell trailing entry. Activation: price >= lp (market
+                    # rises into the short zone). After activation the
+                    # trail tracks the HIGH; we place a SELL stop at
+                    # peak*(1-ltp) so a rejection off the high fires the
+                    # short. sp is ignored — entries don't carry a stop
+                    # loss before opening.
+                    if stopprice > 0:
+                        self._livelog(
+                            f"Sell trailing: stop price {stopprice} ignored "
+                            "(entries use only lp + ltp)"
+                        )
+                        stopprice = 0
+                    activation = limitprice
+                    if activation == 0:
+                        activation = (self._last_price
+                                      or float(close_price or 0))
+                        if activation <= 0:
+                            self._livelog(
+                                "Sell trailing with no limit price: no "
+                                "market price available — skipping"
+                            )
+                            return
+                        self._livelog(
+                            f"Sell trailing: synthesized activation @ "
+                            f"{activation:.2f} (current market)"
+                        )
+                    bs = self._cap_base_size(round(amount_notional / activation, 8),
+                                             intent_label=f"SELL trailing-pending @ {activation:.2f}")
+                    if bs <= 0: return
+                    base_size = self._format_base_size(bs)
+                    intent = (f"SELL trailing-pending {base_size} "
+                              f"activate@{activation:.2f} trail:{ltp}")
+                    self._livelog(intent)
+                    limitprice = activation
+                elif limitprice > 0 and stopprice > 0:
+                    bs = self._cap_base_size(round(amount_notional / limitprice, 8),
+                                             intent_label=f"SELL bracket TP@{limitprice} SL@{stopprice}")
+                    if bs <= 0: return
+                    base_size = self._format_base_size(bs)
+                    intent = f"SELL bracket {base_size} TP@{limitprice} SL@{stopprice}"
+                    resp = self._cb_create_order(cb, order_id, product_id, 'SELL', {
+                        'trigger_bracket_gtc': {
+                            'base_size': base_size,
+                            'limit_price': self._format_price(limitprice),
+                            'stop_trigger_price': self._format_price(stopprice),
+                        }
+                    })
+                    if not self._check_order_response(resp, intent): return
+                    cb_order_id = self._get_cb_order_id(resp, order_id, product_id)
+                    self._livelog(intent)
+                elif limitprice > 0:
                     bs = self._cap_base_size(round(amount_notional / limitprice, 8),
                                              intent_label=f"SELL limit @ {limitprice}")
                     if bs <= 0: return
@@ -1181,34 +1588,46 @@ class LiveTrader:
                     cb_order_id = self._get_cb_order_id(resp, order_id, product_id)
                     self._livelog(intent)
 
-            # Track EVERY order in the DB. The next-tick reconciliation pass in
-            # _read_account_state queries Coinbase for each open row and fires
-            # fill/cancel/fail events for any terminal transitions — this is the
-            # safety net for WS messages we missed (network blip, server restart,
-            # subscription that hadn't connected yet when the order resolved).
-            # Trailing-update logic in _update_trailing_orders already filters
-            # by limittrailpercent>0 so non-trailing rows are inert there.
-            if cb_order_id:
-                base_size_f = float(amount_notional / (limitprice or stopprice or close_price or 1))
+            # Track every order in the DB — including pending trailing rows
+            # that have no exchange order yet (cb_order_id is empty until the
+            # market-poll path places the first stop on activation). The
+            # next-tick reconciliation in _read_account_state fires
+            # fill/cancel/fail events for any terminal transitions, as a
+            # safety net for WS messages we might miss.
+            is_pending_trail = (ltp > 0 and limitprice > 0 and not cb_order_id)
+            if cb_order_id or is_pending_trail:
+                # `base_size` is the venue-formatted base-asset string we
+                # sent (or will send) to Coinbase — that's the source of
+                # truth for the size, not amount_notional which was derived
+                # from entry-sizing math.
+                try:
+                    base_size_f = float(base_size)
+                except (ValueError, TypeError):
+                    base_size_f = float(amount_notional / (limitprice or stopprice or close_price or 1))
                 lutil.runinsert(
                     "INSERT OR IGNORE INTO liveorder "
                     "(scriptid, coinbase_order_id, internal_id, tradetype, limitprice, stopprice, "
                     "amount, limittrailpercent, stoptrailpercent, status, time, "
                     "activated, peak_price, hard_stopprice) "
                     "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (self.scriptid, cb_order_id, order_id, tradetype.name,
+                    (self.scriptid, cb_order_id or '', order_id, tradetype.name,
                      limitprice, stopprice, base_size_f, ltp, stp, 'open', int(time.time()),
                      0, 0.0, float(stopprice)))
 
             # Report the contract count actually placed (after auto-size,
             # capping, and granularity rounding), not the raw user input.
-            # `base_size` is the venue-formatted string sent to Coinbase for
-            # the main order in every branch that reaches here.
             placed_contracts = self._base_size_to_contracts(base_size)
-            self._log_event('create:' + tradetype.name, {
+            # Distinguish "placed on Coinbase" from "tracked locally,
+            # awaiting activation" so the event log makes the state clear.
+            event_name = ('pending:' if is_pending_trail and not cb_order_id
+                          else 'create:') + tradetype.name
+            self._log_event(event_name, {
                 'tradetype': tradetype.name, 'amount': placed_contracts,
                 'limitprice': limitprice, 'stopprice': stopprice,
-                'coinbase_order_id': cb_order_id,
+                'limittrailpercent': float(ltp or 0),
+                'stoptrailpercent': float(stp or 0),
+                'coinbase_order_id': cb_order_id or '',
+                'on_exchange': bool(cb_order_id),
             })
 
         except Exception:

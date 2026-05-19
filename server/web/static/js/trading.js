@@ -2,8 +2,10 @@
 let chart, candleSeries, markersPrimitive;
 let chartindicators = {};
 let indicatorColorMap = {};
-let subPanes = [];
+let indicatorMeta = {};
+let subPane = null;
 let candleslist = [];
+let orderPriceLines = [];
 let colors = ['#FF11FF','#11FFFF','#FFFF11','#AAAAFF','#AAFFAA','#FFAAAA','#FFFFFF','#AAAAAA'];
 let pollTimer = null;
 let pricePollTimer = null;
@@ -63,6 +65,7 @@ async function onScriptChange() {
     document.getElementById('acc_pair').textContent = currentProductId || '—';
     if (!isRunning) await refreshAccountForProduct(currentProductId);
     loadCandles();
+    refreshOpenOrdersCount();
   } catch(e) {}
 }
 
@@ -322,16 +325,16 @@ function setChartIndicators(indicators) {
     chart.removeSeries(chartindicators[name]);
     delete chartindicators[name];
   }
-  for (const pane of subPanes) {
-    try { chart.removePane(pane.paneIndex()); } catch(e) {}
+  if (subPane) {
+    try { chart.removePane(subPane.paneIndex()); } catch(e) {}
+    subPane = null;
   }
-  subPanes = [];
   indicatorColorMap = {};
+  indicatorMeta = {};
   document.getElementById('indicator-legend').innerHTML = '';
 
   const lastClose = candleslist.length > 0 ? candleslist[candleslist.length - 1].close : 0;
   const chartTimes = new Set(candleslist.map(c => c.timestamp));
-  let subPane = null;
   let j = 0;
 
   for (const name in indicators) {
@@ -341,15 +344,14 @@ function setChartIndicators(indicators) {
       e.value !== null && e.value !== undefined && !isNaN(e.value)
     );
 
+    let onSubPane = false;
     let targetPaneIndex = undefined;
     if (lastClose > 0 && data.length > 0) {
       const vals = data.map(d => Math.abs(d.value)).filter(v => isFinite(v));
       if (vals.length > 0 && Math.max(...vals) < lastClose * 0.05) {
-        if (!subPane) {
-          subPane = chart.addPane();
-          subPanes.push(subPane);
-        }
+        if (!subPane) subPane = chart.addPane();
         targetPaneIndex = subPane.paneIndex();
+        onSubPane = true;
       }
     }
 
@@ -360,6 +362,7 @@ function setChartIndicators(indicators) {
     series.setData(data);
     chartindicators[name] = series;
     indicatorColorMap[name] = color;
+    indicatorMeta[name] = { data, color, onSubPane, visible: true };
     j++;
   }
   renderIndicatorLegend();
@@ -386,11 +389,42 @@ function renderIndicatorLegend() {
 }
 
 function toggleIndicator(name, checkbox) {
-  const series = chartindicators[name];
-  if (series) {
-    series.applyOptions({ visible: checkbox.checked });
+  const meta = indicatorMeta[name];
+  if (!meta) return;
+  meta.visible = checkbox.checked;
+
+  // Main-pane indicators just toggle visibility — no axis to drop.
+  if (!meta.onSubPane) {
+    const series = chartindicators[name];
+    if (series) series.applyOptions({ visible: checkbox.checked });
     chart.timeScale().fitContent();
+    return;
   }
+
+  // Sub-pane indicators: remove/recreate the series so the pane (and its
+  // axis) can drop away when the last visible series in it is unchecked,
+  // and come back when any is re-checked.
+  if (!checkbox.checked) {
+    const series = chartindicators[name];
+    if (series) {
+      try { chart.removeSeries(series); } catch(e) {}
+      delete chartindicators[name];
+    }
+    const anyVisible = Object.values(indicatorMeta).some(m => m.onSubPane && m.visible);
+    if (!anyVisible && subPane) {
+      try { chart.removePane(subPane.paneIndex()); } catch(e) {}
+      subPane = null;
+    }
+  } else {
+    if (!subPane) subPane = chart.addPane();
+    const series = chart.addSeries(LightweightCharts.LineSeries, {
+      color: meta.color, lineWidth: 2,
+      priceScaleId: 'right', title: name,
+    }, subPane.paneIndex());
+    series.setData(meta.data);
+    chartindicators[name] = series;
+  }
+  chart.timeScale().fitContent();
 }
 
 // ------------------------------------------------------------------ helpers
@@ -420,11 +454,14 @@ async function loadHistory(page = 0) {
 function renderOrders(orders) {
   const tbody = document.getElementById('orderbody');
   tbody.innerHTML = '';
+  const pct = (v) => (v && v > 0) ? (v * 100).toFixed(2) + '%' : '—';
   for (const o of orders) {
     const tr = document.createElement('tr');
     const dt = fmtUtc(o.time);
     tr.innerHTML = `<td>${dt}</td><td>${o.tradetype}</td><td>${(o.amount||0).toFixed(4)}</td>` +
-                   `<td>${o.limitprice||'—'}</td><td>${o.stopprice||'—'}</td><td>${o.status}</td>`;
+                   `<td>${o.limitprice||'—'}</td><td>${o.stopprice||'—'}</td>` +
+                   `<td>${pct(o.limittrailpercent)}</td><td>${pct(o.stoptrailpercent)}</td>` +
+                   `<td>${o.status}</td>`;
     tbody.appendChild(tr);
   }
 }
@@ -571,13 +608,55 @@ async function refreshOpenOrdersCount() {
       badge.textContent = '!';
       badge.className = 'badge bg-danger ms-1';
       badge.title = data.error;
+      drawOrderPriceLines([]);
     } else {
       const n = data.count || 0;
       badge.textContent = n;
       badge.className = 'badge ms-1 ' + (n > 0 ? 'bg-warning text-dark' : 'bg-secondary');
       badge.title = '';
+      drawOrderPriceLines(data.orders || []);
     }
   } catch(e) {}
+}
+
+// Draw a horizontal price line on the candle chart for each open order leg.
+// Green = limit price, red = stop trigger. Bracket orders get both.
+function drawOrderPriceLines(orders) {
+  if (!candleSeries) return;
+  for (const line of orderPriceLines) {
+    try { candleSeries.removePriceLine(line); } catch(e) {}
+  }
+  orderPriceLines = [];
+
+  for (const o of orders) {
+    if (currentProductId && o.product_id && o.product_id !== currentProductId) continue;
+    const cfg = o.order_configuration || {};
+    const cfgVal = cfg[Object.keys(cfg)[0] || ''] || {};
+    const side = (o.side || '').toUpperCase();
+    const limit = parseFloat(cfgVal.limit_price);
+    const stop = parseFloat(cfgVal.stop_price || cfgVal.stop_trigger_price);
+
+    if (!isNaN(limit) && limit > 0) {
+      orderPriceLines.push(candleSeries.createPriceLine({
+        price: limit,
+        color: '#26a69a',
+        lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Dashed,
+        axisLabelVisible: true,
+        title: side ? side + ' limit' : 'limit',
+      }));
+    }
+    if (!isNaN(stop) && stop > 0) {
+      orderPriceLines.push(candleSeries.createPriceLine({
+        price: stop,
+        color: '#ef5350',
+        lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Dashed,
+        axisLabelVisible: true,
+        title: side ? side + ' stop' : 'stop',
+      }));
+    }
+  }
 }
 
 function openOpenOrdersModal() {
@@ -591,49 +670,126 @@ async function refreshOpenOrdersModal() {
   try {
     const resp = await fetch('/api/live/open_orders');
     const data = await resp.json();
-    if (data.error) {
-      contentEl.innerHTML = `<div class="alert alert-danger small mb-0">Error from Coinbase: ${escHtml(data.error)}</div>`;
-      return;
-    }
     const orders = data.orders || [];
-    // Refresh badge to keep them in sync
+    const internal = data.internal || [];
+
+    // Keep the navbar badge in sync with the exchange count.
     const badge = document.getElementById('openOrdersCount');
     if (badge) {
       badge.textContent = orders.length;
       badge.className = 'badge ms-1 ' + (orders.length > 0 ? 'bg-warning text-dark' : 'bg-secondary');
     }
-    if (orders.length === 0) {
-      contentEl.innerHTML = '<p class="text-muted mb-0">No open orders on the exchange.</p>';
-      return;
-    }
-    let html = '<table class="table table-sm table-bordered table-striped mb-0"><thead><tr>' +
-      '<th>Created</th><th>Product</th><th>Side</th><th>Config</th>' +
-      '<th>Size</th><th>Limit</th><th>Stop</th><th>Status</th><th class="small">Order ID</th>' +
-      '</tr></thead><tbody>';
-    for (const o of orders) {
-      const cfg = o.order_configuration || {};
-      const cfgKey = Object.keys(cfg)[0] || '';
-      const cfgVal = cfg[cfgKey] || {};
-      const limit = cfgVal.limit_price || '—';
-      // trigger_bracket_gtc/gtd uses stop_trigger_price; stop_limit_* uses stop_price
-      const stop = cfgVal.stop_price || cfgVal.stop_trigger_price || '—';
-      const size = cfgVal.base_size || cfgVal.quote_size || '—';
-      let created = '—';
-      if (o.created_time) {
-        const t = Date.parse(o.created_time);
-        if (!isNaN(t)) created = fmtUtc(Math.floor(t / 1000));
+    drawOrderPriceLines(orders);
+
+    // Friendly names for Coinbase order-configuration keys + a hint about
+    // what the "Limit" / "Trigger" cells mean for each type.
+    const cfgTypeName = {
+      'limit_limit_gtc':            'Limit',
+      'limit_limit_gtd':            'Limit (GTD)',
+      'market_market_ioc':          'Market',
+      'stop_limit_stop_limit_gtc':  'Stop Loss (stop-limit)',
+      'stop_limit_stop_limit_gtd':  'Stop Loss (GTD)',
+      'trigger_bracket_gtc':        'Bracket (TP + SL)',
+      'trigger_bracket_gtd':        'Bracket (GTD)',
+    };
+
+    let html = '';
+
+    // === Section 1: live on the exchange ===
+    html += '<h6 class="fw-bold mb-2">On Exchange (Coinbase)</h6>';
+    if (data.error) {
+      html += `<div class="alert alert-danger small mb-3">Error from Coinbase: ${escHtml(data.error)}</div>`;
+    } else if (orders.length === 0) {
+      html += '<p class="text-muted small mb-3">No open orders on the exchange.</p>';
+    } else {
+      html += '<table class="table table-sm table-bordered table-striped mb-3"><thead><tr>' +
+        '<th>Created</th><th>Product</th><th>Side</th><th>Type</th>' +
+        '<th>Size</th>' +
+        '<th title="For Limit: fill price. For Bracket: take-profit price. For Stop Loss (stop-limit): post-trigger slip cap.">Limit</th>' +
+        '<th title="Stop-loss trigger price (or bracket SL trigger).">Trigger</th>' +
+        '<th>Status</th><th class="small">Order ID</th>' +
+        '</tr></thead><tbody>';
+      for (const o of orders) {
+        const cfg = o.order_configuration || {};
+        const cfgKey = Object.keys(cfg)[0] || '';
+        const cfgVal = cfg[cfgKey] || {};
+        const limit = cfgVal.limit_price || '—';
+        // trigger_bracket_gtc/gtd uses stop_trigger_price; stop_limit_* uses stop_price
+        const stop = cfgVal.stop_price || cfgVal.stop_trigger_price || '—';
+        const size = cfgVal.base_size || cfgVal.quote_size || '—';
+        const typeName = cfgTypeName[cfgKey] || cfgKey;
+        let created = '—';
+        if (o.created_time) {
+          const t = Date.parse(o.created_time);
+          if (!isNaN(t)) created = fmtUtc(Math.floor(t / 1000));
+        }
+        html += `<tr><td class="small text-nowrap">${escHtml(created)}</td>` +
+          `<td>${escHtml(o.product_id || '')}</td>` +
+          `<td>${escHtml(o.side || '')}</td>` +
+          `<td class="small" title="${escHtml(cfgKey)}">${escHtml(typeName)}</td>` +
+          `<td>${escHtml(String(size))}</td>` +
+          `<td>${escHtml(String(limit))}</td>` +
+          `<td>${escHtml(String(stop))}</td>` +
+          `<td>${escHtml(o.status || '')}</td>` +
+          `<td class="small font-monospace">${escHtml(o.order_id || '')}</td></tr>`;
       }
-      html += `<tr><td class="small text-nowrap">${escHtml(created)}</td>` +
-        `<td>${escHtml(o.product_id || '')}</td>` +
-        `<td>${escHtml(o.side || '')}</td>` +
-        `<td class="small">${escHtml(cfgKey)}</td>` +
-        `<td>${escHtml(String(size))}</td>` +
-        `<td>${escHtml(String(limit))}</td>` +
-        `<td>${escHtml(String(stop))}</td>` +
-        `<td>${escHtml(o.status || '')}</td>` +
-        `<td class="small font-monospace">${escHtml(o.order_id || '')}</td></tr>`;
+      html += '</tbody></table>';
     }
-    html += '</tbody></table>';
+
+    // === Section 2: internal-only state ===
+    // Coinbase has no concept of trail %, activation, peak, or hard stop —
+    // those live in the local liveorder rows. Show them here so the user
+    // can see the trail layered on top of the exchange order.
+    html += '<h6 class="fw-bold mb-2 mt-3">Internal Tracking <span class="text-muted small">(trail state — not on the exchange)</span></h6>';
+    html += '<p class="text-muted small mb-2">' +
+      'Trailing orders live here until activation. The <b>Limit / Activation</b> ' +
+      'column is the threshold the market has to cross before the system places ' +
+      'a trailing stop on Coinbase. If a <b>Hard Stop</b> is set on a trailing ' +
+      'Exit, only that hard stop sits on the exchange pre-activation as initial ' +
+      'protection — it gets cancelled and replaced by the trailing stop once ' +
+      'activation fires. Entries (Buy/Sell) with a trail have nothing on the ' +
+      'exchange pre-activation.' +
+      '</p>';
+    if (internal.length === 0) {
+      html += '<p class="text-muted small mb-0">No internal open orders.</p>';
+    } else {
+      const pct = (v) => (v && v > 0) ? (v * 100).toFixed(2) + '%' : '—';
+      const num = (v, d=2) => (v && v > 0) ? Number(v).toFixed(d) : '—';
+      const exchangeIds = new Set(orders.map(o => o.order_id));
+      html += '<table class="table table-sm table-bordered table-striped mb-0"><thead><tr>' +
+        '<th>Time</th><th>Type</th><th>Amount</th>' +
+        '<th title="For trailing Exits this is the activation threshold (not a fill price). For other order types it is the limit price.">Limit / Activation</th>' +
+        '<th title="Current stop price (moves up as the trail follows the peak).">Current Stop</th>' +
+        '<th>Limit Trail %</th><th>Stop Trail %</th>' +
+        '<th>Activated</th><th>Peak</th>' +
+        '<th title="Floor for the trailing stop — the stop never moves below this.">Hard Stop</th>' +
+        '<th>On Exch</th><th class="small">CB Order ID</th>' +
+        '</tr></thead><tbody>';
+      for (const o of internal) {
+        const dt = fmtUtc(o.time);
+        const onExch = exchangeIds.has(o.coinbase_order_id);
+        // For trailing Exits, the limitprice field is an activation threshold,
+        // not a Coinbase limit — label it so the value isn't mistaken for a TP.
+        const trailing = (o.tradetype === 'Exit') && (o.limittrailpercent > 0);
+        const limitLabel = trailing && o.limitprice > 0
+          ? `<span class="text-muted small">act @</span> ${num(o.limitprice)}`
+          : num(o.limitprice);
+        html += `<tr><td class="small text-nowrap">${escHtml(dt)}</td>` +
+          `<td>${escHtml(o.tradetype || '')}</td>` +
+          `<td>${(o.amount||0).toFixed(6)}</td>` +
+          `<td>${limitLabel}</td>` +
+          `<td>${num(o.stopprice)}</td>` +
+          `<td>${pct(o.limittrailpercent)}</td>` +
+          `<td>${pct(o.stoptrailpercent)}</td>` +
+          `<td>${o.activated ? 'yes' : 'no'}</td>` +
+          `<td>${num(o.peak_price)}</td>` +
+          `<td>${num(o.hard_stopprice)}</td>` +
+          `<td>${onExch ? '<span class="text-success">yes</span>' : '<span class="text-warning">no</span>'}</td>` +
+          `<td class="small font-monospace">${escHtml(o.coinbase_order_id || '')}</td></tr>`;
+      }
+      html += '</tbody></table>';
+    }
+
     contentEl.innerHTML = html;
   } catch(e) {
     contentEl.innerHTML = `<div class="alert alert-danger small mb-0">Failed to load: ${escHtml(String(e))}</div>`;

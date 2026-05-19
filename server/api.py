@@ -404,7 +404,20 @@ async def live_balance(session: str = Depends(require_session)):
 @router.get("/live/price")
 async def live_price(session: str = Depends(require_session)):
     from coinbase_http import CoinbaseHTTP
+    import time as _time
     trader = live_module.get_trader()
+
+    # Prefer the cache populated by the LiveTrader's 5s market poll. The
+    # backend is already hitting Coinbase on its own cadence; reading the
+    # cache here means the frontend doesn't double up the request.
+    if trader and trader.running and trader._last_price > 0:
+        if _time.time() - trader._last_price_time < 10:
+            return JSONResponse({'price': round(trader._last_price, 2),
+                                 'source': 'cache'})
+
+    # Fallback: no trader, or cache is stale. Fetch directly. (When trader
+    # isn't running, update_trailing is a no-op via its internal guard, so
+    # we don't bother calling it.)
     product_id = (trader.pair if trader else None) or autil.getkeyval('live_pair') or ''
     if not product_id:
         return JSONResponse({'price': 0})
@@ -421,7 +434,12 @@ async def live_price(session: str = Depends(require_session)):
             price = ask
         else:
             price = float(product.get('price') or 0)
-        return JSONResponse({'price': round(price, 2)})
+        if trader and trader.running and price > 0:
+            # Warm the cache so the next frontend poll skips the network.
+            trader._last_price = price
+            trader._last_price_time = _time.time()
+            trader.update_trailing(price)
+        return JSONResponse({'price': round(price, 2), 'source': 'fetch'})
     except Exception:
         pass
     return JSONResponse({'price': 0})
@@ -552,15 +570,25 @@ async def live_account(session: str = Depends(require_session),
 
 @router.get("/live/open_orders")
 async def live_open_orders(session: str = Depends(require_session)):
-    """Live count + detail of OPEN orders on Coinbase for derivatives products."""
+    """Live count + detail of OPEN orders on Coinbase for derivatives products,
+    plus our internal liveorder rows so the modal can surface trail state
+    (trail %, activation, peak) that Coinbase doesn't track."""
     from coinbase_http import CoinbaseHTTP
+    scriptid = autil.getkeyval('live_scriptid')
+    internal = []
+    if scriptid:
+        internal = autil.runselect(
+            "SELECT * FROM liveorder WHERE scriptid=? AND status='open' "
+            "ORDER BY time DESC",
+            (int(scriptid),))
     try:
         cb = CoinbaseHTTP()
         data = cb.list_orders(order_status=['OPEN'], product_type='FUTURE', limit=100)
         orders = data.get('orders', []) or []
-        return JSONResponse({'orders': orders, 'count': len(orders)})
+        return JSONResponse({'orders': orders, 'count': len(orders), 'internal': internal})
     except Exception as e:
-        return JSONResponse({'orders': [], 'count': None, 'error': str(e)})
+        return JSONResponse({'orders': [], 'count': None, 'error': str(e),
+                             'internal': internal})
 
 
 @router.get("/live/history")
