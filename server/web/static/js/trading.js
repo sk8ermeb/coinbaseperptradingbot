@@ -460,7 +460,7 @@ function renderOrders(orders) {
     const dt = fmtUtc(o.time);
     tr.innerHTML = `<td>${dt}</td><td>${o.tradetype}</td><td>${(o.amount||0).toFixed(4)}</td>` +
                    `<td>${o.limitprice||'—'}</td><td>${o.stopprice||'—'}</td>` +
-                   `<td>${pct(o.limittrailpercent)}</td><td>${pct(o.stoptrailpercent)}</td>` +
+                   `<td>${pct(o.limittrailpercent)}</td>` +
                    `<td>${o.status}</td>`;
     tbody.appendChild(tr);
   }
@@ -760,7 +760,7 @@ async function refreshOpenOrdersModal() {
         '<th>Time</th><th>Type</th><th>Amount</th>' +
         '<th title="For trailing Exits this is the activation threshold (not a fill price). For other order types it is the limit price.">Limit / Activation</th>' +
         '<th title="Current stop price (moves up as the trail follows the peak).">Current Stop</th>' +
-        '<th>Limit Trail %</th><th>Stop Trail %</th>' +
+        '<th>Limit Trail %</th>' +
         '<th>Activated</th><th>Peak</th>' +
         '<th title="Floor for the trailing stop — the stop never moves below this.">Hard Stop</th>' +
         '<th>On Exch</th><th class="small">CB Order ID</th>' +
@@ -780,7 +780,6 @@ async function refreshOpenOrdersModal() {
           `<td>${limitLabel}</td>` +
           `<td>${num(o.stopprice)}</td>` +
           `<td>${pct(o.limittrailpercent)}</td>` +
-          `<td>${pct(o.stoptrailpercent)}</td>` +
           `<td>${o.activated ? 'yes' : 'no'}</td>` +
           `<td>${num(o.peak_price)}</td>` +
           `<td>${num(o.hard_stopprice)}</td>` +

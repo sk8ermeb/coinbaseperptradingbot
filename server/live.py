@@ -772,8 +772,8 @@ class LiveTrader:
                 resp = self._cb_create_order(cb, new_cb_id, product_id, cb_side, {
                     'stop_limit_stop_limit_gtc': {
                         'base_size': base_size,
-                        'limit_price': self._format_stop_limit_price(new_stop, cb_side),
-                        'stop_price': self._format_price(new_stop),
+                        'limit_price': self._format_price(new_stop),
+                        'stop_price': self._format_stop_trigger_price(new_stop, cb_side),
                         'stop_direction': stop_dir,
                     }
                 })
@@ -1013,21 +1013,25 @@ class LiveTrader:
         rounded = round(price / pi) * pi
         return f"{rounded:.{self._price_decimals()}f}"
 
-    def _format_stop_limit_price(self, stop_price: float, side: str) -> str:
-        """Limit price for a stop_limit order: offset from stop by ~0.1% in the
-        direction the trigger fires, AND at least 1 tick (in case the percent
-        offset rounds back onto the stop on coarse-tick products). `side` is
-        the order side (BUY → limit above stop, SELL → limit below stop)."""
+    def _format_stop_trigger_price(self, limit_price: float, side: str) -> str:
+        """Trigger price for a stop_limit order. The user's stated price is
+        the LIMIT (the worst acceptable fill); the trigger is offset ~0.1%
+        BEFORE the limit so that when it fires, the resulting limit order
+        still has room to cross the book. Also enforces at least 1 tick of
+        separation (in case the percent offset rounds onto the limit on
+        coarse-tick products).
+          BUY  stop (STOP_UP, price rising):  trigger BELOW limit.
+          SELL stop (STOP_DOWN, price falling): trigger ABOVE limit."""
         pi = self._price_increment or 0.01
-        rounded_stop = round(stop_price / pi) * pi
+        rounded_limit = round(limit_price / pi) * pi
         if (side or '').upper() == 'BUY':
-            candidate = round((stop_price * 1.001) / pi) * pi
-            if candidate <= rounded_stop:
-                candidate = rounded_stop + pi
+            candidate = round((limit_price * 0.999) / pi) * pi
+            if candidate >= rounded_limit:
+                candidate = rounded_limit - pi
         else:
-            candidate = round((stop_price * 0.999) / pi) * pi
-            if candidate >= rounded_stop:
-                candidate = rounded_stop - pi
+            candidate = round((limit_price * 1.001) / pi) * pi
+            if candidate <= rounded_limit:
+                candidate = rounded_limit + pi
         return f"{candidate:.{self._price_decimals()}f}"
 
     def _cb_create_order(self, cb, client_order_id, product_id, side, order_configuration):
@@ -1312,8 +1316,8 @@ class LiveTrader:
                         resp = self._cb_create_order(cb, order_id, product_id, side, {
                             'stop_limit_stop_limit_gtc': {
                                 'base_size': base_size,
-                                'limit_price': self._format_stop_limit_price(stopprice, side),
-                                'stop_price': self._format_price(stopprice),
+                                'limit_price': self._format_price(stopprice),
+                                'stop_price': self._format_stop_trigger_price(stopprice, side),
                                 'stop_direction': stop_dir,
                             }
                         })
@@ -1354,8 +1358,8 @@ class LiveTrader:
                     resp = self._cb_create_order(cb, order_id, product_id, side, {
                         'stop_limit_stop_limit_gtc': {
                             'base_size': base_size,
-                            'limit_price': self._format_stop_limit_price(stopprice, side),
-                            'stop_price': self._format_price(stopprice),
+                            'limit_price': self._format_price(stopprice),
+                            'stop_price': self._format_stop_trigger_price(stopprice, side),
                             'stop_direction': 'STOP_DIRECTION_STOP_DOWN' if pos > 0 else 'STOP_DIRECTION_STOP_UP',
                         }
                     })
@@ -1461,8 +1465,8 @@ class LiveTrader:
                     resp = self._cb_create_order(cb, order_id, product_id, 'BUY', {
                         'stop_limit_stop_limit_gtc': {
                             'base_size': base_size,
-                            'limit_price': self._format_stop_limit_price(stopprice, 'BUY'),
-                            'stop_price': self._format_price(stopprice),
+                            'limit_price': self._format_price(stopprice),
+                            'stop_price': self._format_stop_trigger_price(stopprice, 'BUY'),
                             'stop_direction': 'STOP_DIRECTION_STOP_UP',
                         }
                     })
@@ -1567,8 +1571,8 @@ class LiveTrader:
                     resp = self._cb_create_order(cb, order_id, product_id, 'SELL', {
                         'stop_limit_stop_limit_gtc': {
                             'base_size': base_size,
-                            'limit_price': self._format_stop_limit_price(stopprice, 'SELL'),
-                            'stop_price': self._format_price(stopprice),
+                            'limit_price': self._format_price(stopprice),
+                            'stop_price': self._format_stop_trigger_price(stopprice, 'SELL'),
                             'stop_direction': 'STOP_DIRECTION_STOP_DOWN',
                         }
                     })
