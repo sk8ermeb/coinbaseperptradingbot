@@ -579,7 +579,7 @@ async def live_open_orders(session: str = Depends(require_session)):
     if scriptid:
         internal = autil.runselect(
             "SELECT * FROM liveorder WHERE scriptid=? AND status='open' "
-            "ORDER BY time DESC",
+            "ORDER BY time DESC, id DESC",
             (int(scriptid),))
     try:
         cb = CoinbaseHTTP()
@@ -597,11 +597,14 @@ async def live_history(session: str = Depends(require_session), page: int = Quer
     if not scriptid:
         return JSONResponse({'events': [], 'orders': [], 'page': page})
     offset = page * 300
+    # id is autoincrement on insert, so it breaks `time` ties in actual
+    # insertion order — needed because cancel/place/WS events fire from
+    # different threads within the same second.
     events = autil.runselect(
-        "SELECT * FROM liveevent WHERE scriptid=? ORDER BY time DESC LIMIT 300 OFFSET ?",
+        "SELECT * FROM liveevent WHERE scriptid=? ORDER BY time DESC, id DESC LIMIT 300 OFFSET ?",
         (int(scriptid), offset))
     orders = autil.runselect(
-        "SELECT * FROM liveorder WHERE scriptid=? ORDER BY time DESC LIMIT 100",
+        "SELECT * FROM liveorder WHERE scriptid=? ORDER BY time DESC, id DESC LIMIT 100",
         (int(scriptid),))
     return JSONResponse({'events': events, 'orders': orders, 'page': page})
 

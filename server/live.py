@@ -31,6 +31,10 @@ class LiveTrader:
         # Serializes trail updates triggered from the API price-poll thread
         # so they don't race with each other (or with any internal callers).
         self._trail_lock = threading.Lock()
+        # Order ids cancelled by the trail loop as part of a reposition.
+        # The WS `cancel` event and the reconciliation `cancel:<tt>` event
+        # consult this set so trail churn doesn't spam push notifications.
+        self._trail_canceling_ids = set()
         # Latest market mid cached by the backend's 5s poll. The /api/live/price
         # endpoint reads from here so the frontend doesn't have to hit Coinbase
         # itself when the trader thread is already polling.
@@ -78,7 +82,7 @@ class LiveTrader:
         lines.append(entry)
         lutil.setkeyval(key, '\n'.join(lines[-500:]))
 
-    def _log_event(self, event_type, data):
+    def _log_event(self, event_type, data, notify=True):
         try:
             lutil.runinsert(
                 "INSERT INTO liveevent (scriptid, eventtype, eventdata, time) VALUES(?,?,?,?)",
@@ -86,6 +90,8 @@ class LiveTrader:
             )
         except Exception:
             pass
+        if not notify:
+            return
         try:
             import ntfy_util
             ntfy_util.send_notification(event_type, data)
@@ -478,7 +484,12 @@ class LiveTrader:
                 elif status in ('CANCELLED', 'EXPIRED'):
                     lutil.runupdate("UPDATE liveorder SET status='cancelled' WHERE id=?", (row['id'],))
                     self._livelog(f"Order {cb_id} {status} on exchange (filled {evt['filled_size']})")
-                    self._log_event('cancel:' + tt, evt)
+                    # Trail-initiated cancels: log but don't notify, and
+                    # drop the id from the set now that we've seen its
+                    # terminal state.
+                    trail_owned = cb_id in self._trail_canceling_ids
+                    self._trail_canceling_ids.discard(cb_id)
+                    self._log_event('cancel:' + tt, evt, notify=not trail_owned)
                 elif status == 'FAILED':
                     lutil.runupdate("UPDATE liveorder SET status='failed' WHERE id=?", (row['id'],))
                     self._livelog(f"Order {cb_id} FAILED on exchange")
@@ -754,9 +765,13 @@ class LiveTrader:
             # leaves the position briefly unprotected for ~2-5s before
             # the new trailing stop lands — accepted tradeoff.
             if row['coinbase_order_id']:
+                # Register the id so the cancel WS + reconciliation events
+                # it triggers don't fire push notifications (trail churn).
+                self._trail_canceling_ids.add(row['coinbase_order_id'])
                 try:
                     cb.cancel_orders([row['coinbase_order_id']])
                 except Exception:
+                    self._trail_canceling_ids.discard(row['coinbase_order_id'])
                     self._livelog(
                         f"Trail cancel failed for {row['coinbase_order_id']} "
                         f"— skipping replace:\n{traceback.format_exc()}"
@@ -765,7 +780,12 @@ class LiveTrader:
 
             # Place the new stop_limit.
             new_cb_id = str(uuid.uuid4())
-            base_size = self._format_base_size(self._round_to_increment(float(row['amount'])))
+            # row['amount'] is contract count; convert to base-asset units
+            # for _format_base_size, which expects BTC and re-divides by
+            # contract_size for the wire string.
+            cs = self._contract_size or 1.0
+            amount_btc = float(row['amount']) * cs
+            base_size = self._format_base_size(self._round_to_increment(amount_btc))
             intent = (f"TRAIL {cb_side} stop_limit {base_size} @ {new_stop:.2f} "
                       f"[{tradetype} peak {peak:.2f} trail:{ltp*100:.2f}%]")
             try:
@@ -797,7 +817,7 @@ class LiveTrader:
                 'limittrailpercent': float(ltp),
                 'market_price': float(price),
                 'first_placement': first_placement,
-            })
+            }, notify=False)
 
     # ------------------------------------------------------------------ product limits
 
@@ -946,10 +966,13 @@ class LiveTrader:
         avg_price = order.get('avg_price') or order.get('average_filled_price') or '0'
         product = order.get('product_id') or self._ws_product_id or ''
         event_type = 'fill' if status == 'FILLED' else 'cancel'
+        # Suppress notification when the cancel was initiated by the trail
+        # loop — the user doesn't want a ping every time the trail steps.
+        notify = not (event_type == 'cancel' and order_id in self._trail_canceling_ids)
         self._log_event(event_type, {
             'order_id': order_id, 'product_id': product, 'side': side,
             'status': status, 'filled': str(filled), 'avg_price': str(avg_price),
-        })
+        }, notify=notify)
         self._livelog(f"WS {status}: {side} {filled} {product} @ {avg_price}")
         try:
             if self._ws_product_id:
@@ -1600,14 +1623,17 @@ class LiveTrader:
             # safety net for WS messages we might miss.
             is_pending_trail = (ltp > 0 and limitprice > 0 and not cb_order_id)
             if cb_order_id or is_pending_trail:
-                # `base_size` is the venue-formatted base-asset string we
-                # sent (or will send) to Coinbase — that's the source of
-                # truth for the size, not amount_notional which was derived
-                # from entry-sizing math.
+                # Store size as CONTRACT COUNT (venue-stable). The wire
+                # `base_size` is contracts on CDE/FCM but base-asset units
+                # on INTX; _base_size_to_contracts normalizes both back to
+                # contracts so downstream readers (trail loop, UI, events)
+                # don't have to know the venue.
                 try:
-                    base_size_f = float(base_size)
+                    base_size_f = self._base_size_to_contracts(base_size)
                 except (ValueError, TypeError):
-                    base_size_f = float(amount_notional / (limitprice or stopprice or close_price or 1))
+                    cs = self._contract_size or 0.01
+                    btc = float(amount_notional / (limitprice or stopprice or close_price or 1))
+                    base_size_f = btc / cs if cs > 0 else btc
                 lutil.runinsert(
                     "INSERT OR IGNORE INTO liveorder "
                     "(scriptid, coinbase_order_id, internal_id, tradetype, limitprice, stopprice, "
