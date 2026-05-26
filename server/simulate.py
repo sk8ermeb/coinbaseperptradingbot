@@ -482,25 +482,24 @@ class Simulation:
                 if ltp > 0 and float(position['limitprice']) > 0:
                     cur_limit = float(position['limitprice'])
                     if tradetype == util.TradeType.Buy.name:
-                        # Symmetric to Exit-on-short below: downside trail.
-                        # Activation when price drops to user's limitprice;
-                        # after activation, track the trough and place the
-                        # buy trigger at trough*(1+ltp). stopprice walks
-                        # monotonically down — the fill block looks for
-                        # high >= stopprice (bounce back up through the
-                        # trigger). Mirrors live.py:_trail_direction Buy.
+                        # Downside trail. Intra-bar low is the actual trough
+                        # visited during the candle; close is what we use to
+                        # confirm the bounce-back (the fill block enforces
+                        # close >= trigger for trailing entries). Using low
+                        # for peak + close for fill avoids the inconsistency
+                        # of mixing close-based peak with intra-bar fill.
                         activated = position.get('activated', False)
                         peak = float(position.get('peak_price', 0))
-                        if not activated and mark <= cur_limit:
+                        if not activated and low <= cur_limit:
                             activated = True
-                            peak = mark
+                            peak = low
                             position['activated'] = True
                             position['peak_price'] = peak
-                            sutil.simlog(f"Trailing buy activated at {mark:.2f}")
+                            sutil.simlog(f"Trailing buy activated (low reached {low:.2f})")
                             trailing_updated = True
                         if activated:
-                            if peak == 0 or mark < peak:
-                                peak = mark
+                            if peak == 0 or low < peak:
+                                peak = low
                                 position['peak_price'] = peak
                             new_stop = peak * (1.0 + ltp)
                             if new_stop != float(position.get('stopprice', 0)):
@@ -508,22 +507,21 @@ class Simulation:
                                 position['stopprice'] = new_stop
                                 trailing_updated = True
                     elif tradetype == util.TradeType.Sell.name:
-                        # Symmetric to Exit-on-long below: upside trail.
-                        # Activation when price rises to limitprice; after
-                        # activation, track the peak and place the sell
-                        # trigger at peak*(1-ltp).
+                        # Upside trail (mirror of Buy above). Intra-bar high
+                        # is the actual peak; close confirms the bounce-down
+                        # in the fill block.
                         activated = position.get('activated', False)
                         peak = float(position.get('peak_price', 0))
-                        if not activated and mark >= cur_limit:
+                        if not activated and high >= cur_limit:
                             activated = True
-                            peak = mark
+                            peak = high
                             position['activated'] = True
                             position['peak_price'] = peak
-                            sutil.simlog(f"Trailing sell activated at {mark:.2f}")
+                            sutil.simlog(f"Trailing sell activated (high reached {high:.2f})")
                             trailing_updated = True
                         if activated:
-                            if mark > peak:
-                                peak = mark
+                            if high > peak:
+                                peak = high
                                 position['peak_price'] = peak
                             new_stop = peak * (1.0 - ltp)
                             if new_stop != float(position.get('stopprice', 0)):
@@ -536,16 +534,16 @@ class Simulation:
                         peak = float(position.get('peak_price', 0))
                         hard_stop = float(position.get('hard_stopprice', position.get('stopprice', 0)))
                         if cur_pos > 0:
-                            if not activated and mark >= cur_limit:
+                            if not activated and high >= cur_limit:
                                 activated = True
-                                peak = mark
+                                peak = high
                                 position['activated'] = True
                                 position['peak_price'] = peak
-                                sutil.simlog(f"Trailing stop activated (long) at {mark:.2f}")
+                                sutil.simlog(f"Trailing stop activated (long, high reached {high:.2f})")
                                 trailing_updated = True
                             if activated:
-                                if mark > peak:
-                                    peak = mark
+                                if high > peak:
+                                    peak = high
                                     position['peak_price'] = peak
                                 new_stop = peak * (1.0 - ltp)
                                 if hard_stop > 0:
@@ -555,16 +553,16 @@ class Simulation:
                                     position['stopprice'] = new_stop
                                     trailing_updated = True
                         elif cur_pos < 0:
-                            if not activated and mark <= cur_limit:
+                            if not activated and low <= cur_limit:
                                 activated = True
-                                peak = mark
+                                peak = low
                                 position['activated'] = True
                                 position['peak_price'] = peak
-                                sutil.simlog(f"Trailing stop activated (short) at {mark:.2f}")
+                                sutil.simlog(f"Trailing stop activated (short, low reached {low:.2f})")
                                 trailing_updated = True
                             if activated:
-                                if peak == 0 or mark < peak:
-                                    peak = mark
+                                if peak == 0 or low < peak:
+                                    peak = low
                                     position['peak_price'] = peak
                                 new_stop = peak * (1.0 + ltp)
                                 if hard_stop > 0:
@@ -727,10 +725,13 @@ class Simulation:
 
                 if ordertype == util.OrderType.Stop.name or ordertype == util.OrderType.Bracket.name:
                     if tradetype == util.TradeType.Buy.name:
-                        # Skip when stopprice is 0 — that's a trailing entry
-                        # still waiting on its activation candle. Without
-                        # this, `high >= 0` would fire on the first tick.
-                        if stopprice > 0 and high >= stopprice:
+                        # stopprice==0 → un-activated trailing entry, skip.
+                        # For a *trailing* entry require the candle to close
+                        # back above the trigger (not just wick through it);
+                        # plain buy stops use intra-bar high as before.
+                        ltp_val = float(position.get('limittrailpercent', 0))
+                        trigger_ref = close if ltp_val > 0 else high
+                        if stopprice > 0 and trigger_ref >= stopprice:
                             if self.namespace['realposition'] < 0:
                                 liquid = abs(self.namespace['realposition'])
                                 newprice, newamount, newusd, fee, notional = self.updatecostbasis(stopprice, liquid, takerfee)
@@ -760,9 +761,10 @@ class Simulation:
                             positionsfilled.append(position)
                             filled = True
                     elif tradetype == util.TradeType.Sell.name:
-                        # Same guard as Buy above — un-activated trailing
-                        # sells have stopprice=0 until activation fires.
-                        if stopprice > 0 and low <= stopprice:
+                        # Same guard + close-confirmation rule as Buy above.
+                        ltp_val = float(position.get('limittrailpercent', 0))
+                        trigger_ref = close if ltp_val > 0 else low
+                        if stopprice > 0 and trigger_ref <= stopprice:
                             if self.namespace['realposition'] > 0:
                                 liquid = self.namespace['realposition']
                                 newprice, newamount, newusd, fee, notional = self.updatecostbasis(stopprice, -liquid, takerfee)
@@ -793,8 +795,18 @@ class Simulation:
                             filled = True
                     elif tradetype == util.TradeType.Exit.name:
                         cur_pos = self.namespace['realposition']
-                        # Stop-loss: exit long when price drops, exit short when price rises
-                        if (cur_pos > 0 and low <= stopprice) or (cur_pos < 0 and high >= stopprice):
+                        # Trailing exits require close-confirmation (the
+                        # candle has to actually close past the trigger,
+                        # not just wick through). Plain stop-losses keep
+                        # the intra-bar low/high check.
+                        ltp_val = float(position.get('limittrailpercent', 0))
+                        if ltp_val > 0:
+                            triggered = ((cur_pos > 0 and close <= stopprice)
+                                         or (cur_pos < 0 and close >= stopprice))
+                        else:
+                            triggered = ((cur_pos > 0 and low <= stopprice)
+                                         or (cur_pos < 0 and high >= stopprice))
+                        if triggered:
                             # Exit amount is in CONTRACTS (per CLAUDE.md); 0 means close all
                             close_qty = abs(cur_pos) if amount == 0 else min(int(abs(amount)), abs(cur_pos))
                             crypt = -close_qty if cur_pos > 0 else close_qty
