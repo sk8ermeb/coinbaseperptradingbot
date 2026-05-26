@@ -299,10 +299,17 @@ let lastTickTime = null;
 async function loadCandles(fitView = true) {
   try {
     const gran = document.getElementById('granularityDropdown').value;
+    const sid  = document.getElementById('scriptDropdown').value;
+    // Always pass the selected scriptid so the event markers track the
+    // script the user is viewing, not whichever one last called start().
+    const sidParam = (sid && parseInt(sid) >= 0) ? `scriptid=${encodeURIComponent(sid)}` : '';
     let params = '';
     if (!isRunning) {
       if (!currentProductId) return;  // no script selected → nothing to chart
       params = `?product_id=${encodeURIComponent(currentProductId)}&granularity=${encodeURIComponent(gran)}`;
+      if (sidParam) params += '&' + sidParam;
+    } else if (sidParam) {
+      params = '?' + sidParam;
     }
     const resp = await fetch('/api/live/candles' + params);
     if (!resp.ok) return;

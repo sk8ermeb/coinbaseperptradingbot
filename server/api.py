@@ -330,7 +330,8 @@ async def live_status(session: str = Depends(require_session)):
 @router.get("/live/candles")
 async def live_candles(session: str = Depends(require_session),
                        product_id: str = Query(None),
-                       granularity: str = Query(None)):
+                       granularity: str = Query(None),
+                       scriptid: int = Query(None)):
     trader = live_module.get_trader()
     if trader and trader.running:
         use_product = trader.pair
@@ -358,12 +359,14 @@ async def live_candles(session: str = Depends(require_session),
                 if not _math.isnan(e['value']) and not _math.isinf(e['value'])
             ]
 
-    # Events for the active script that fall within the visible candle window,
-    # snapped to their containing candle so chart markers land on a bar. Only
-    # the four chart-relevant categories (user/create/fill/cancel) are returned
-    # — tick/trail rows are noise on the chart.
+    # Events for the script being viewed. Prefer the explicit ?scriptid=
+    # param from the frontend (matches the script dropdown the user is
+    # actually looking at); fall back to the running trader's id only when
+    # the frontend didn't say. Snap each event's time to its containing
+    # candle and filter to chart-relevant categories.
     events = []
-    scriptid = autil.getkeyval('live_scriptid')
+    if scriptid is None:
+        scriptid = autil.getkeyval('live_scriptid')
     if scriptid and candles:
         win_start = int(candles[0]['timestamp'])
         win_end   = int(candles[-1]['timestamp']) + gran_secs
