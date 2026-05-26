@@ -252,6 +252,14 @@ class util:
                 cur.execute("ALTER TABLE exchangesim ADD COLUMN totalticks INTEGER DEFAULT 0")
             except Exception:
                 pass
+            try:
+                cur.execute("ALTER TABLE exchangesim ADD COLUMN downloadticks INTEGER DEFAULT 0")
+            except Exception:
+                pass
+            try:
+                cur.execute("ALTER TABLE exchangesim ADD COLUMN downloadtotal INTEGER DEFAULT 0")
+            except Exception:
+                pass
             conn.commit()
             cur.close()
             conn.close()
@@ -506,11 +514,28 @@ class util:
 
         return(certfile, keyfile)
 
-    def gethistoricledata(self, granularity:str, pair:str, start:int, stop:int):
+    def gethistoricledata(self, granularity:str, pair:str, start:int, stop:int, progress_cb=None):
         # Lazy import to avoid circular dependency (coinbase_http imports util)
         from coinbase_http import CoinbaseHTTP
         product_id = pair
         cb = CoinbaseHTTP()
+
+        # Pre-compute how many seconds we expect to actually fetch from the
+        # API so the caller can show a progress bar that completes promptly
+        # when the cache is full and stays accurate when it isn't. Matches
+        # the two-phase fetch loop below (early gap + late gap, no
+        # mid-range refill).
+        early_row = self.runselect("SELECT timestamp FROM candle WHERE duration=? and pair=? ORDER BY timestamp LIMIT 1", (granularity, pair))
+        late_row  = self.runselect("SELECT timestamp FROM candle WHERE duration=? and pair=? ORDER BY timestamp DESC LIMIT 1", (granularity, pair))
+        if early_row:
+            cache_low = early_row[0]['timestamp']
+            cache_high = late_row[0]['timestamp']
+            total_work = max(0, cache_low - start) + max(0, stop - cache_high)
+        else:
+            total_work = max(0, stop - start)
+        done_work = 0
+        if progress_cb:
+            progress_cb(done_work, total_work)
 
         candles = self.runselect("SELECT * FROM candle WHERE duration=? and pair=? ORDER BY timestamp LIMIT 1", (granularity, pair))
         if len(candles) > 0:
@@ -535,10 +560,15 @@ class util:
                             pass
                 except Exception as e:
                     print(f"gethistoricledata fetch error: {e}")
+                done_work += max(0, pagediff - tstart)
+                if progress_cb:
+                    progress_cb(done_work, total_work)
                 tstart = pagediff
 
         candles = self.runselect("SELECT * FROM candle WHERE duration=? and pair=? ORDER BY timestamp DESC LIMIT 1", (granularity, pair))
         if not candles:
+            if progress_cb:
+                progress_cb(total_work, total_work)
             return []
         timebase = stop
         tstart = candles[0]['timestamp']
@@ -558,7 +588,15 @@ class util:
                             pass
                 except Exception as e:
                     print(f"gethistoricledata fetch error: {e}")
+                done_work += max(0, pagediff - tstart)
+                if progress_cb:
+                    progress_cb(done_work, total_work)
                 tstart = pagediff
+
+        # Force a final 100% so the bar transitions to the sim phase even if
+        # the running sum drifted (partial fetches, integer rounding).
+        if progress_cb:
+            progress_cb(total_work, total_work)
 
         candles = self.runselect("SELECT * FROM candle WHERE timestamp>=? AND timestamp<=? AND duration=? and pair=? ORDER BY timestamp", (start, stop, granularity, pair))
         return candles

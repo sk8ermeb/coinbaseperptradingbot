@@ -205,19 +205,25 @@ async def startsim(session: str = Depends(require_session),
 async def simstatus(session: str = Depends(require_session),
                     simid: int = Query(..., description="Sim ID")):
     rows = autil.runselect(
-        "SELECT status, currenttick, totalticks, log FROM exchangesim WHERE id=?", (simid,))
+        "SELECT status, currenttick, totalticks, downloadticks, downloadtotal, log FROM exchangesim WHERE id=?", (simid,))
     if not rows:
         raise HTTPException(status_code=400, detail="Sim not found")
     row = rows[0]
     status = row['status']
     current = row.get('currenttick') or 0
     total = row.get('totalticks') or 0
-    pct = round(current / total * 100, 1) if total > 0 else 0
+    dl_cur = row.get('downloadticks') or 0
+    dl_tot = row.get('downloadtotal') or 0
+    pct      = round(current / total * 100, 1) if total > 0 else 0
+    download_pct = round(dl_cur / dl_tot * 100, 1) if dl_tot > 0 else 100
     return JSONResponse({
         'status': status,
         'current': current,
         'total': total,
         'pct': pct,
+        'download_current': dl_cur,
+        'download_total': dl_tot,
+        'download_pct': download_pct,
         'log': row.get('log') or '',
     })
 
@@ -352,7 +358,33 @@ async def live_candles(session: str = Depends(require_session),
                 if not _math.isnan(e['value']) and not _math.isinf(e['value'])
             ]
 
-    return JSONResponse({'candles': candles, 'indicators': indicators})
+    # Events for the active script that fall within the visible candle window,
+    # snapped to their containing candle so chart markers land on a bar. Only
+    # the four chart-relevant categories (user/create/fill/cancel) are returned
+    # — tick/trail rows are noise on the chart.
+    events = []
+    scriptid = autil.getkeyval('live_scriptid')
+    if scriptid and candles:
+        win_start = int(candles[0]['timestamp'])
+        win_end   = int(candles[-1]['timestamp']) + gran_secs
+        rows = autil.runselect(
+            "SELECT id, eventtype, eventdata, time FROM liveevent "
+            "WHERE scriptid=? AND time >= ? AND time < ? "
+            "AND (eventtype LIKE 'user:%' OR eventtype LIKE 'create:%' "
+            "OR eventtype LIKE 'fill:%'  OR eventtype LIKE 'cancel:%') "
+            "ORDER BY time, id",
+            (int(scriptid), win_start, win_end))
+        for r in rows:
+            t = int(r['time'])
+            events.append({
+                'id': r['id'],
+                'time': (t // gran_secs) * gran_secs,
+                'eventtype': r['eventtype'],
+                'eventdata': r['eventdata'],
+            })
+
+    return JSONResponse({'candles': candles, 'indicators': indicators,
+                         'events': events})
 
 
 @router.get("/live/balance")

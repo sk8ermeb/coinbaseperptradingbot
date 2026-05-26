@@ -31,11 +31,16 @@ let initcandles = [
       // add more...
     ];
 
-function setSimProgress(pct) {
+function setSimProgress(pct, phase) {
   const bar = document.getElementById('simProgressBar');
   const clamped = Math.min(100, Math.max(0, pct));
   bar.style.width = clamped + '%';
-  bar.textContent = clamped.toFixed(0) + '%';
+  // Swap colour class for the download phase so the user can tell the two
+  // passes apart at a glance.
+  bar.classList.remove('bg-primary', 'bg-success');
+  bar.classList.add(phase === 'download' ? 'bg-success' : 'bg-primary');
+  const label = phase === 'download' ? 'downloading' : 'simulating';
+  bar.textContent = clamped.toFixed(0) + '% ' + label;
 }
 
 function resetSimUI() {
@@ -46,7 +51,7 @@ function resetSimUI() {
   document.getElementById('bstartsim').classList.remove('d-none');
   document.getElementById('bstopsim').classList.add('d-none');
   document.getElementById('simProgressContainer').classList.add('d-none');
-  setSimProgress(0);
+  setSimProgress(0, 'sim');
   currentSimId = null;
 }
 
@@ -93,7 +98,7 @@ async function runScript() {
   document.getElementById('bstartsim').classList.add('d-none');
   document.getElementById('bstopsim').classList.remove('d-none');
   document.getElementById('simProgressContainer').classList.remove('d-none');
-  setSimProgress(0);
+  setSimProgress(0, 'download');
   currentScriptId = scriptid;
 
   const start = pickerToUtc(startDate);
@@ -121,13 +126,22 @@ async function runScript() {
       if (!statusResp.ok) return;
       const s = await statusResp.json();
 
-      setSimProgress(s.pct || 0);
+      // Two-phase progress: green/downloading until candles are fetched,
+      // then blue/simulating. `download_total` of 0 means everything was
+      // already cached → skip straight to the sim bar.
+      const dlTot = s.download_total || 0;
+      const dlPct = s.download_pct || 0;
+      if (dlTot > 0 && dlPct < 100) {
+        setSimProgress(dlPct, 'download');
+      } else {
+        setSimProgress(s.pct || 0, 'sim');
+      }
 
       if (s.status === 1) {
         // Complete
         clearInterval(simPollInterval);
         simPollInterval = null;
-        setSimProgress(100);
+        setSimProgress(100, 'sim');
         await loadSimResults(currentSimId, currentScriptId);
         resetSimUI();
       } else if (s.status === -2) {

@@ -5,6 +5,7 @@ let indicatorColorMap = {};
 let indicatorMeta = {};
 let subPane = null;
 let candleslist = [];
+let eventlist = [];
 let orderPriceLines = [];
 let colors = ['#FF11FF','#11FFFF','#FFFF11','#AAAAFF','#AAFFAA','#FFAAAA','#FFFFFF','#AAAAAA'];
 let pollTimer = null;
@@ -308,8 +309,59 @@ async function loadCandles(fitView = true) {
     const data = await resp.json();
     setChartCandles(data.candles || []);
     setChartIndicators(data.indicators || {});
+    eventlist = data.events || [];
+    applyEventFilters();
     if (fitView) chart.timeScale().fitContent();
   } catch(e) {}
+}
+
+function eventCategory(eventtype) {
+  if (eventtype.startsWith('user'))   return 'user';
+  if (eventtype.startsWith('fill'))   return 'fill';
+  if (eventtype.startsWith('create')) return 'create';
+  if (eventtype.startsWith('cancel')) return 'cancel';
+  return 'other';
+}
+
+function applyEventFilters() {
+  if (!markersPrimitive) return;
+  const showUser   = document.getElementById('chkUser').checked;
+  const showCreate = document.getElementById('chkCreate').checked;
+  const showFill   = document.getElementById('chkFill').checked;
+  const showCancel = document.getElementById('chkCancel').checked;
+  const chartTimes = new Set(candleslist.map(c => c.timestamp));
+  const markers = [];
+  for (const ev of eventlist) {
+    if (!chartTimes.has(ev.time)) continue;  // candle not visible → skip
+    const cat = eventCategory(ev.eventtype);
+    if (cat === 'user'   && !showUser)   continue;
+    if (cat === 'fill'   && !showFill)   continue;
+    if (cat === 'create' && !showCreate) continue;
+    if (cat === 'cancel' && !showCancel) continue;
+    let color = '';
+    if      (cat === 'user')   color = colors[3];
+    else if (cat === 'fill')   color = colors[4];
+    else if (cat === 'create') color = colors[5];
+    else if (cat === 'cancel') color = colors[7];
+    else                       color = colors[6];
+    let shape = 'square';
+    if      (ev.eventtype.includes('Buy'))         shape = 'arrowUp';
+    else if (ev.eventtype.includes('Sell'))        shape = 'arrowDown';
+    else if (ev.eventtype.includes('Liquidation')) shape = 'circle';
+    else if (cat === 'cancel')                     shape = 'circle';
+    markers.push({time: ev.time, position: 'aboveBar', color: color, shape: shape, text: ev.eventtype});
+  }
+  markersPrimitive.setMarkers(markers);
+}
+
+function onEventFilterChange() {
+  localStorage.setItem('liveEventFilters', JSON.stringify({
+    user:   document.getElementById('chkUser').checked,
+    create: document.getElementById('chkCreate').checked,
+    fill:   document.getElementById('chkFill').checked,
+    cancel: document.getElementById('chkCancel').checked,
+  }));
+  applyEventFilters();
 }
 
 function setChartCandles(candles) {
@@ -454,13 +506,11 @@ async function loadHistory(page = 0) {
 function renderOrders(orders) {
   const tbody = document.getElementById('orderbody');
   tbody.innerHTML = '';
-  const pct = (v) => (v && v > 0) ? (v * 100).toFixed(2) + '%' : '—';
   for (const o of orders) {
     const tr = document.createElement('tr');
     const dt = fmtUtc(o.time);
     tr.innerHTML = `<td>${dt}</td><td>${o.tradetype}</td><td>${(o.amount||0).toFixed(4)}</td>` +
                    `<td>${o.limitprice||'—'}</td><td>${o.stopprice||'—'}</td>` +
-                   `<td>${pct(o.limittrailpercent)}</td>` +
                    `<td>${o.status}</td>`;
     tbody.appendChild(tr);
   }
@@ -805,6 +855,18 @@ async function refreshOpenOrdersModal() {
     for (const opt of drop.options) {
       if (opt.value === savedId) { opt.selected = true; break; }
     }
+  }
+
+  // Restore event-filter checkbox state.
+  const savedFilters = localStorage.getItem('liveEventFilters');
+  if (savedFilters) {
+    try {
+      const f = JSON.parse(savedFilters);
+      document.getElementById('chkUser').checked   = f.user   !== false;
+      document.getElementById('chkCreate').checked = f.create !== false;
+      document.getElementById('chkFill').checked   = f.fill   !== false;
+      document.getElementById('chkCancel').checked = f.cancel !== false;
+    } catch(e) {}
   }
 
   try {

@@ -57,13 +57,31 @@
 
   <!-- Chart tab -->
   <div class="tab-pane active" id="charttab">
+    <div class="d-flex gap-3 align-items-center px-3 pt-2">
+      <div class="form-check form-check-inline mb-0">
+        <input class="form-check-input" type="checkbox" id="chkUser" onchange="onEventFilterChange()">
+        <label class="form-check-label" for="chkUser">User</label>
+      </div>
+      <div class="form-check form-check-inline mb-0">
+        <input class="form-check-input" type="checkbox" id="chkCreate" onchange="onEventFilterChange()">
+        <label class="form-check-label" for="chkCreate">Create</label>
+      </div>
+      <div class="form-check form-check-inline mb-0">
+        <input class="form-check-input" type="checkbox" id="chkFill" onchange="onEventFilterChange()" checked>
+        <label class="form-check-label" for="chkFill">Fill</label>
+      </div>
+      <div class="form-check form-check-inline mb-0">
+        <input class="form-check-input" type="checkbox" id="chkCancel" onchange="onEventFilterChange()">
+        <label class="form-check-label" for="chkCancel">Cancel</label>
+      </div>
+    </div>
     <div class="container-fluid" style="overflow:hidden;">
       <div class="d-flex flex-column flex-md-row flex-nowrap">
 
         <!-- Chart -->
         <div class="flex-grow-1 order-md-1" style="min-width:0;">
           <div id="chart" class="shadow-sm border border-7 border-secondary rounded-4 p-2 m-3"
-               style="height:calc(100vh - 230px);background:#1a1a1a;"></div>
+               style="height:calc(100vh - 260px);background:#1a1a1a;"></div>
         </div>
 
         <!-- Side panel -->
@@ -115,7 +133,7 @@
       <table class="table table-sm table-striped table-hover" id="ordertable">
         <thead><tr>
           <th>Time</th><th>Type</th><th>Amount</th><th>Limit</th><th>Stop</th>
-          <th>Limit Trail %</th><th>Status</th>
+          <th>Status</th>
         </tr></thead>
         <tbody id="orderbody"></tbody>
       </table>

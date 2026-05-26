@@ -728,6 +728,16 @@ class LiveTrader:
                     f"Trail activated [{tradetype}] at {price:.2f} "
                     f"(activation@{activation:.2f}, trail:{ltp*100:.2f}%)"
                 )
+                # One-shot notification: subsequent trail re-places are
+                # suppressed (notify=False at the end of this function), so
+                # this is the user's only ping between create and fill.
+                self._log_event('create:trail-activated', {
+                    'tradetype': tradetype,
+                    'coinbase_order_id': row['coinbase_order_id'] or '',
+                    'activation_price': float(activation),
+                    'market_price': float(price),
+                    'limittrailpercent': float(ltp),
+                })
 
             # Peak update (monotonic in the favorable direction).
             if upside:
@@ -805,8 +815,8 @@ class LiveTrader:
             new_cb_id = self._get_cb_order_id(resp, new_cb_id, product_id) or new_cb_id
 
             lutil.runupdate(
-                "UPDATE liveorder SET coinbase_order_id=?, stopprice=? WHERE id=?",
-                (new_cb_id, new_stop, row['id']))
+                "UPDATE liveorder SET coinbase_order_id=?, stopprice=?, limitprice=? WHERE id=?",
+                (new_cb_id, new_stop, new_stop, row['id']))
             self._livelog(intent)
             self._log_event('trail:' + tradetype, {
                 'coinbase_order_id': new_cb_id,

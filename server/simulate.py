@@ -160,13 +160,13 @@ class Simulation:
             except Exception:
                 self._min_contracts = 1
 
-        if self.good:
-            self.simcandles = sutil.gethistoricledata(self.granularity, historicalpair, self.start, self.stop)
-        else:
-            self.simcandles = []
+        # Defer the candle download to load_candles() so /startsim can return
+        # immediately with a simid the frontend can poll for download progress.
+        self.simcandles = []
+        self._historicalpair = historicalpair
         self.cancelled = False
         self.simid = sutil.runinsert("INSERT INTO exchangesim (log, granularity, pair, start, stop, scriptid, runat, currenttick, totalticks) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                                     ("", self.granularity, historicalpair or product_id, start, stop, scriptid, int(time.time()), 0, len(self.simcandles)))
+                                     ("", self.granularity, historicalpair or product_id, start, stop, scriptid, int(time.time()), 0, 0))
         sutil.setkeyval('simid', self.simid)
         sutil.setkeyval(f'sim_{self.simid}_leverage', str(self.namespace['leverage']))
         sutil.setkeyval(f'sim_{self.simid}_contract_size', str(self._contract_size))
@@ -481,17 +481,55 @@ class Simulation:
 
                 if ltp > 0 and float(position['limitprice']) > 0:
                     cur_limit = float(position['limitprice'])
-                    new_limit = None
                     if tradetype == util.TradeType.Buy.name:
-                        # Buy limit is below market — trail up as price rises
-                        candidate = mark * (1.0 - ltp)
-                        if candidate > cur_limit:
-                            new_limit = candidate
+                        # Symmetric to Exit-on-short below: downside trail.
+                        # Activation when price drops to user's limitprice;
+                        # after activation, track the trough and place the
+                        # buy trigger at trough*(1+ltp). stopprice walks
+                        # monotonically down — the fill block looks for
+                        # high >= stopprice (bounce back up through the
+                        # trigger). Mirrors live.py:_trail_direction Buy.
+                        activated = position.get('activated', False)
+                        peak = float(position.get('peak_price', 0))
+                        if not activated and mark <= cur_limit:
+                            activated = True
+                            peak = mark
+                            position['activated'] = True
+                            position['peak_price'] = peak
+                            sutil.simlog(f"Trailing buy activated at {mark:.2f}")
+                            trailing_updated = True
+                        if activated:
+                            if peak == 0 or mark < peak:
+                                peak = mark
+                                position['peak_price'] = peak
+                            new_stop = peak * (1.0 + ltp)
+                            if new_stop != float(position.get('stopprice', 0)):
+                                sutil.simlog(f"Trailing buy update: trough:{peak:.2f} trigger:{new_stop:.2f}")
+                                position['stopprice'] = new_stop
+                                trailing_updated = True
                     elif tradetype == util.TradeType.Sell.name:
-                        # Sell limit is above market — trail down as price drops
-                        candidate = mark * (1.0 + ltp)
-                        if candidate < cur_limit:
-                            new_limit = candidate
+                        # Symmetric to Exit-on-long below: upside trail.
+                        # Activation when price rises to limitprice; after
+                        # activation, track the peak and place the sell
+                        # trigger at peak*(1-ltp).
+                        activated = position.get('activated', False)
+                        peak = float(position.get('peak_price', 0))
+                        if not activated and mark >= cur_limit:
+                            activated = True
+                            peak = mark
+                            position['activated'] = True
+                            position['peak_price'] = peak
+                            sutil.simlog(f"Trailing sell activated at {mark:.2f}")
+                            trailing_updated = True
+                        if activated:
+                            if mark > peak:
+                                peak = mark
+                                position['peak_price'] = peak
+                            new_stop = peak * (1.0 - ltp)
+                            if new_stop != float(position.get('stopprice', 0)):
+                                sutil.simlog(f"Trailing sell update: peak:{peak:.2f} trigger:{new_stop:.2f}")
+                                position['stopprice'] = new_stop
+                                trailing_updated = True
                     elif tradetype == util.TradeType.Exit.name:
                         # limitprice is activation threshold; limittrailpercent trails stop from peak
                         activated = position.get('activated', False)
@@ -689,7 +727,10 @@ class Simulation:
 
                 if ordertype == util.OrderType.Stop.name or ordertype == util.OrderType.Bracket.name:
                     if tradetype == util.TradeType.Buy.name:
-                        if high >= stopprice:
+                        # Skip when stopprice is 0 — that's a trailing entry
+                        # still waiting on its activation candle. Without
+                        # this, `high >= 0` would fire on the first tick.
+                        if stopprice > 0 and high >= stopprice:
                             if self.namespace['realposition'] < 0:
                                 liquid = abs(self.namespace['realposition'])
                                 newprice, newamount, newusd, fee, notional = self.updatecostbasis(stopprice, liquid, takerfee)
@@ -719,7 +760,9 @@ class Simulation:
                             positionsfilled.append(position)
                             filled = True
                     elif tradetype == util.TradeType.Sell.name:
-                        if low <= stopprice:
+                        # Same guard as Buy above — un-activated trailing
+                        # sells have stopprice=0 until activation fires.
+                        if stopprice > 0 and low <= stopprice:
                             if self.namespace['realposition'] > 0:
                                 liquid = self.namespace['realposition']
                                 newprice, newamount, newusd, fee, notional = self.updatecostbasis(stopprice, -liquid, takerfee)
@@ -831,7 +874,18 @@ class Simulation:
                     if amount <= 0:
                         sutil.simlog("Buy skipped — auto-size returned 0 (equity exhausted?)")
                         continue
-                    if limitprice == 0 and stopprice == 0:
+                    if limittrailpercent > 0 and limitprice > 0:
+                        # Trailing entry — limitprice is the activation
+                        # threshold; stopprice gets populated by the trail
+                        # block once price drops through activation. Any
+                        # user-supplied stopprice is dropped (mirrors
+                        # live.py:1420-1425 "Buy trailing: stop price ignored").
+                        if stopprice > 0:
+                            sutil.simlog(f"Trailing buy: stopprice {stopprice} ignored")
+                        stopprice = 0
+                        ordertype = util.OrderType.Stop
+                        sutil.simlog(f"Trailing buy: activation at {limitprice} trail:{limittrailpercent}")
+                    elif limitprice == 0 and stopprice == 0:
                         price = close
                         ordertype = util.OrderType.Market
                         sutil.simlog("Market buy at "+str(price))
@@ -877,7 +931,14 @@ class Simulation:
                     if amount <= 0:
                         sutil.simlog("Sell skipped — auto-size returned 0 (equity exhausted?)")
                         continue
-                    if limitprice == 0 and stopprice == 0:
+                    if limittrailpercent > 0 and limitprice > 0:
+                        # Trailing entry — mirror of the Buy branch above.
+                        if stopprice > 0:
+                            sutil.simlog(f"Trailing sell: stopprice {stopprice} ignored")
+                        stopprice = 0
+                        ordertype = util.OrderType.Stop
+                        sutil.simlog(f"Trailing sell: activation at {limitprice} trail:{limittrailpercent}")
+                    elif limitprice == 0 and stopprice == 0:
                         price = close
                         ordertype = util.OrderType.Market
                         sutil.simlog("Market sell at "+str(price))
@@ -1070,7 +1131,32 @@ class Simulation:
         return True
 
 
+    def load_candles(self):
+        """Fetch the candle range from Coinbase (or cache), reporting progress
+        to exchangesim.downloadticks/downloadtotal so the frontend can render
+        a download bar separate from the sim bar. Throttled DB writes — at
+        most one update per second — so a long fetch doesn't hammer SQLite."""
+        if not self.good:
+            return
+        last_write = [0.0]
+        def _cb(done, total):
+            now = time.time()
+            # Always write the final 100% sample so the frontend can transition.
+            if total > 0 and done < total and (now - last_write[0]) < 1.0:
+                return
+            last_write[0] = now
+            sutil.runupdate(
+                "UPDATE exchangesim SET downloadticks=?, downloadtotal=? WHERE id=?",
+                (int(done), int(total), self.simid))
+        self.simcandles = sutil.gethistoricledata(
+            self.granularity, self._historicalpair, self.start, self.stop,
+            progress_cb=_cb)
+        sutil.runupdate(
+            "UPDATE exchangesim SET totalticks=? WHERE id=?",
+            (len(self.simcandles), self.simid))
+
     def runsim(self):
+        self.load_candles()
         self._precompute_indicators()
         if not self.good:
             return False
