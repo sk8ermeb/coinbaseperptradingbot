@@ -774,17 +774,22 @@ class LiveTrader:
             # If the existing order is the case-4 hard stop, this cancel
             # leaves the position briefly unprotected for ~2-5s before
             # the new trailing stop lands — accepted tradeoff.
+            #
+            # The cancel must be CONFIRMED gone from the book before we place
+            # the replacement: a second near-identical resting stop-limit while
+            # the old one is still OPEN is what Coinbase rejects with the
+            # generic UNKNOWN_FAILURE_REASON (the old fire-and-forget cancel
+            # raced the new placement and lost). If we can't confirm the cancel,
+            # skip the replace this cycle and retry on the next poll — never
+            # place a duplicate.
             if row['coinbase_order_id']:
                 # Register the id so the cancel WS + reconciliation events
                 # it triggers don't fire push notifications (trail churn).
                 self._trail_canceling_ids.add(row['coinbase_order_id'])
-                try:
-                    cb.cancel_orders([row['coinbase_order_id']])
-                except Exception:
-                    self._trail_canceling_ids.discard(row['coinbase_order_id'])
+                if not self._cancel_and_confirm(cb, row['coinbase_order_id']):
                     self._livelog(
-                        f"Trail cancel failed for {row['coinbase_order_id']} "
-                        f"— skipping replace:\n{traceback.format_exc()}"
+                        f"Trail: cancel of {row['coinbase_order_id']} not confirmed "
+                        f"— skipping replace this cycle (will retry next poll)"
                     )
                     continue
 
@@ -1151,6 +1156,55 @@ class LiveTrader:
         return None
 
     # ------------------------------------------------------------------ cancel order
+
+    def _cancel_and_confirm(self, cb, order_id, timeout=8.0, attempts=3):
+        """Cancel a resting order and BLOCK until Coinbase confirms it has left
+        the OPEN book (or `timeout` elapses). Returns True only when the order
+        is confirmed gone, so the caller can safely place a replacement without
+        two near-identical resting stop-limits colliding on the exchange
+        (Coinbase rejects the second with UNKNOWN_FAILURE_REASON).
+
+        Used by the trail loop, which re-prices by cancel+replace. Does NOT
+        touch the DB or emit cancel events — the WS/reconciliation paths own the
+        cancelled row's status update. Safe to run on the background poll thread
+        only: update_trailing holds a non-blocking lock, so the frontend price
+        path returns the cached price instead of waiting on this."""
+        # Retry the cancel REQUEST itself on transient errors (network blips)
+        # so a momentary hiccup doesn't make us skip the re-price for a whole
+        # poll cycle. A definitive exchange rejection (success:false) is NOT
+        # retried — that's a real answer (e.g. the order already filled), and
+        # retrying it would be wrong.
+        resp = None
+        for attempt in range(1, attempts + 1):
+            try:
+                resp = cb.cancel_orders([order_id])
+                break
+            except Exception:
+                self._livelog(
+                    f"Trail cancel request error for {order_id} "
+                    f"(attempt {attempt}/{attempts}):\n{traceback.format_exc()}"
+                )
+                if attempt < attempts:
+                    time.sleep(0.5)
+        if resp is None:
+            return False
+        results = resp.get('results', []) if isinstance(resp, dict) else []
+        first = results[0] if results else {}
+        if not first.get('success'):
+            reason = first.get('failure_reason') or 'no response'
+            self._livelog(f"Trail cancel of {order_id} rejected by exchange: {reason}")
+            return False
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                data = cb.list_orders(order_status=['OPEN'], product_type='FUTURE', limit=100)
+                open_orders = data.get('orders', []) or []
+                if not any((o.get('order_id') or '') == order_id for o in open_orders):
+                    return True
+            except Exception:
+                self._livelog(f"Trail cancel confirm poll error for {order_id}:\n{traceback.format_exc()}")
+            time.sleep(0.4)
+        return False
 
     def _cancel_order(self, order_id):
         # Issue the cancel and BLOCK until Coinbase confirms the order has
