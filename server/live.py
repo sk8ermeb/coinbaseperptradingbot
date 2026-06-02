@@ -433,6 +433,69 @@ class LiveTrader:
             self.namespace['realposition'] = 0.0
             self.namespace['costbasis'] = 0.0
 
+    def _emit_order_terminal_event(self, row, status, order_payload):
+        """Mark the local liveorder `row` as terminal and emit the canonical
+        suffixed event (fill:<tt>, cancel:<tt>, fail:<tt>). Idempotent —
+        if the row was already terminal (the other path got there first), this
+        is a no-op so WS + reconciliation don't double-emit. `row` is a row from
+        the liveorder table; `status` is the upper-case Coinbase status;
+        `order_payload` is the get_order/WS order dict (used to surface
+        filled_size / average_filled_price in the event)."""
+        if (row['status'] or '').lower() in ('filled', 'cancelled', 'failed'):
+            return True
+        cb_id = row['coinbase_order_id'] or ''
+        tt = row['tradetype'] or 'order'
+        filled_size = float(
+            order_payload.get('filled_size',
+                              order_payload.get('cumulative_quantity', 0)) or 0)
+        avg_price = float(
+            order_payload.get('average_filled_price',
+                              order_payload.get('avg_price', 0)) or 0)
+        # Coinbase returns total_fees as a string on FILLED orders (both the
+        # REST get_order body and the WS user-channel push). When the order
+        # isn't yet filled / is cancelled with no fills, it's "0" or absent.
+        total_fees = float(order_payload.get('total_fees', 0) or 0)
+        total_value_after_fees = float(
+            order_payload.get('total_value_after_fees', 0) or 0)
+        evt = {
+            'coinbase_order_id': cb_id,
+            'tradetype': tt,
+            'amount': row['amount'] or 0,
+            'limitprice': row['limitprice'] or 0,
+            'stopprice': row['stopprice'] or 0,
+            'limittrailpercent': row['limittrailpercent'] or 0,
+            'stoptrailpercent': row['stoptrailpercent'] or 0,
+            'status': status,
+            'filled_size': filled_size,
+            'average_filled_price': avg_price,
+            'completion_percentage': float(order_payload.get('completion_percentage', 0) or 0),
+            'total_fees': total_fees,
+            'total_value_after_fees': total_value_after_fees,
+        }
+        if status == 'FILLED':
+            lutil.runupdate("UPDATE liveorder SET status='filled' WHERE id=?", (row['id'],))
+            self._livelog(
+                f"Order {cb_id} FILLED {filled_size} @ {avg_price:.2f} "
+                f"(fee ${total_fees:.4f})"
+            )
+            self._log_event('fill:' + tt, evt)
+        elif status in ('CANCELLED', 'EXPIRED'):
+            lutil.runupdate("UPDATE liveorder SET status='cancelled' WHERE id=?", (row['id'],))
+            self._livelog(f"Order {cb_id} {status} on exchange (filled {filled_size})")
+            # Trail-initiated cancels: log but don't notify, and drop the id
+            # from the set now that we've seen its terminal state.
+            trail_owned = cb_id in self._trail_canceling_ids
+            self._trail_canceling_ids.discard(cb_id)
+            self._log_event('cancel:' + tt, evt, notify=not trail_owned)
+        elif status == 'FAILED':
+            lutil.runupdate("UPDATE liveorder SET status='failed' WHERE id=?", (row['id'],))
+            self._livelog(f"Order {cb_id} FAILED on exchange")
+            self._log_event('fail:' + tt, evt)
+        else:
+            self._livelog(f"Order {cb_id} unknown status '{status}' — leaving open")
+            return False
+        return True
+
     def _read_account_state(self, product_id):
         self.refresh_balance_position(product_id, silent=False)
         cb = CoinbaseHTTP()
@@ -461,41 +524,7 @@ class LiveTrader:
                 status = (order.get('status') or '').upper()
                 if status in ('OPEN', 'PENDING', 'QUEUED', ''):
                     continue  # still working — leave the DB row alone
-                tt = row['tradetype'] or 'order'
-                evt = {
-                    'coinbase_order_id': cb_id,
-                    'tradetype': tt,
-                    'amount': row['amount'] or 0,
-                    'limitprice': row['limitprice'] or 0,
-                    'stopprice': row['stopprice'] or 0,
-                    'limittrailpercent': row['limittrailpercent'] or 0,
-                    'stoptrailpercent': row['stoptrailpercent'] or 0,
-                    'status': status,
-                    'filled_size': float(order.get('filled_size', 0) or 0),
-                    'average_filled_price': float(order.get('average_filled_price', 0) or 0),
-                    'completion_percentage': float(order.get('completion_percentage', 0) or 0),
-                }
-                if status == 'FILLED':
-                    lutil.runupdate("UPDATE liveorder SET status='filled' WHERE id=?", (row['id'],))
-                    self._livelog(
-                        f"Order {cb_id} FILLED {evt['filled_size']} @ {evt['average_filled_price']:.2f}"
-                    )
-                    self._log_event('fill:' + tt, evt)
-                elif status in ('CANCELLED', 'EXPIRED'):
-                    lutil.runupdate("UPDATE liveorder SET status='cancelled' WHERE id=?", (row['id'],))
-                    self._livelog(f"Order {cb_id} {status} on exchange (filled {evt['filled_size']})")
-                    # Trail-initiated cancels: log but don't notify, and
-                    # drop the id from the set now that we've seen its
-                    # terminal state.
-                    trail_owned = cb_id in self._trail_canceling_ids
-                    self._trail_canceling_ids.discard(cb_id)
-                    self._log_event('cancel:' + tt, evt, notify=not trail_owned)
-                elif status == 'FAILED':
-                    lutil.runupdate("UPDATE liveorder SET status='failed' WHERE id=?", (row['id'],))
-                    self._livelog(f"Order {cb_id} FAILED on exchange")
-                    self._log_event('fail:' + tt, evt)
-                else:
-                    self._livelog(f"Order {cb_id} unknown status '{status}' — leaving open")
+                self._emit_order_terminal_event(row, status, order)
 
             # Look up the local liveorder rows so we can surface trail
             # percents in pendingpositions AND include pending-trail rows
@@ -980,15 +1009,29 @@ class LiveTrader:
         filled = order.get('cumulative_quantity') or order.get('filled_size') or '0'
         avg_price = order.get('avg_price') or order.get('average_filled_price') or '0'
         product = order.get('product_id') or self._ws_product_id or ''
-        event_type = 'fill' if status == 'FILLED' else 'cancel'
-        # Suppress notification when the cancel was initiated by the trail
-        # loop — the user doesn't want a ping every time the trail steps.
-        notify = not (event_type == 'cancel' and order_id in self._trail_canceling_ids)
-        self._log_event(event_type, {
-            'order_id': order_id, 'product_id': product, 'side': side,
-            'status': status, 'filled': str(filled), 'avg_price': str(avg_price),
-        }, notify=notify)
         self._livelog(f"WS {status}: {side} {filled} {product} @ {avg_price}")
+        # Prefer the suffixed fill:<tt>/cancel:<tt> event so the chart and
+        # Recent Orders table always get an entry — reconciliation in
+        # _read_account_state used to be the sole emitter of those, but it
+        # skips rows that are no longer status='open' (e.g. the trail loop
+        # marked them cancelled in a cancel+replace that raced with this
+        # fill), which is how exit fills went missing from the UI. If we
+        # can't find a matching local row (foreign/manual order), fall back
+        # to the bare fill/cancel event so the user still sees something.
+        rows = lutil.runselect(
+            "SELECT * FROM liveorder WHERE scriptid=? AND coinbase_order_id=?",
+            (self.scriptid, order_id))
+        if rows:
+            self._emit_order_terminal_event(rows[0], status, order)
+        else:
+            event_type = 'fill' if status == 'FILLED' else 'cancel'
+            # Suppress notification when the cancel was initiated by the
+            # trail loop — the user doesn't want a ping every trail step.
+            notify = not (event_type == 'cancel' and order_id in self._trail_canceling_ids)
+            self._log_event(event_type, {
+                'order_id': order_id, 'product_id': product, 'side': side,
+                'status': status, 'filled': str(filled), 'avg_price': str(avg_price),
+            }, notify=notify)
         try:
             if self._ws_product_id:
                 self._read_account_state(self._ws_product_id)

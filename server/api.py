@@ -386,8 +386,18 @@ async def live_candles(session: str = Depends(require_session),
                 'eventdata': r['eventdata'],
             })
 
+    # Open local liveorder rows for the viewed script. The chart draws its
+    # stop/limit/activation horizontal lines from these so they appear the
+    # moment the candle data loads, with no extra Coinbase round-trip.
+    internal = []
+    if scriptid:
+        internal = autil.runselect(
+            "SELECT * FROM liveorder WHERE scriptid=? AND status='open' "
+            "ORDER BY time DESC, id DESC",
+            (int(scriptid),))
+
     return JSONResponse({'candles': candles, 'indicators': indicators,
-                         'events': events})
+                         'events': events, 'internal': internal})
 
 
 @router.get("/live/balance")

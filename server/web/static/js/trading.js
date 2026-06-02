@@ -7,6 +7,7 @@ let subPane = null;
 let candleslist = [];
 let eventlist = [];
 let orderPriceLines = [];
+let orderPriceLinePrices = [];
 let colors = ['#FF11FF','#11FFFF','#FFFF11','#AAAAFF','#AAFFAA','#FFAAAA','#FFFFFF','#AAAAAA'];
 let pollTimer = null;
 let pricePollTimer = null;
@@ -31,6 +32,19 @@ candleSeries = chart.addSeries(LightweightCharts.CandlestickSeries);
 candleSeries.applyOptions({
   upColor: '#26a69a', downColor: '#ef5350',
   borderVisible: false, wickUpColor: '#26a69a', wickDownColor: '#ef5350',
+});
+
+// Invisible helper series we use only to pin the Y-axis range. Lightweight-
+// charts does not reliably auto-extend the price scale to include createPriceLine
+// values that fall far outside the candle range (e.g. a hard stop several %
+// below current price), so we feed those values as data points in this hidden
+// series; the chart's auto-scale then includes them naturally.
+let priceLineScaleSeries = chart.addSeries(LightweightCharts.LineSeries, {
+  color: 'rgba(0,0,0,0)',
+  lineWidth: 1,
+  lastValueVisible: false,
+  priceLineVisible: false,
+  crosshairMarkerVisible: false,
 });
 markersPrimitive = LightweightCharts.createSeriesMarkers(candleSeries, []);
 chart.timeScale().fitContent();
@@ -318,6 +332,7 @@ async function loadCandles(fitView = true) {
     setChartIndicators(data.indicators || {});
     eventlist = data.events || [];
     applyEventFilters();
+    drawOrderPriceLines(data.internal || []);
     if (fitView) chart.timeScale().fitContent();
   } catch(e) {}
 }
@@ -427,16 +442,37 @@ function setChartIndicators(indicators) {
   renderIndicatorLegend();
 }
 
+function loadIndicatorVisibility() {
+  try {
+    const sid = document.getElementById('scriptDropdown').value;
+    const raw = localStorage.getItem('liveIndicatorVis_' + sid);
+    return raw ? JSON.parse(raw) : {};
+  } catch(e) { return {}; }
+}
+
+function saveIndicatorVisibility() {
+  try {
+    const sid = document.getElementById('scriptDropdown').value;
+    const state = {};
+    for (const name in indicatorMeta) {
+      state[name] = indicatorMeta[name].visible;
+    }
+    localStorage.setItem('liveIndicatorVis_' + sid, JSON.stringify(state));
+  } catch(e) {}
+}
+
 function renderIndicatorLegend() {
   const legend = document.getElementById('indicator-legend');
   legend.innerHTML = '';
+  const saved = loadIndicatorVisibility();
+  const toHide = [];
   for (const name in chartindicators) {
     const color = indicatorColorMap[name] || '#ffffff';
     const label = document.createElement('label');
     label.style.cssText = 'display:flex;align-items:center;gap:4px;cursor:pointer;font-size:0.78rem;white-space:nowrap;';
     const cb = document.createElement('input');
     cb.type = 'checkbox';
-    cb.checked = true;
+    cb.checked = saved[name] !== false;  // default visible; only false hides
     cb.onchange = () => toggleIndicator(name, cb);
     const swatch = document.createElement('span');
     swatch.style.cssText = `display:inline-block;width:10px;height:10px;background:${color};border-radius:2px;flex-shrink:0;`;
@@ -444,13 +480,19 @@ function renderIndicatorLegend() {
     label.appendChild(swatch);
     label.appendChild(document.createTextNode(name));
     legend.appendChild(label);
+    if (!cb.checked) toHide.push({ name, cb });
   }
+  // Apply persisted hidden state after the legend is built so toggleIndicator's
+  // sub-pane teardown finds the series in chartindicators (setChartIndicators
+  // just created them all as visible).
+  for (const { name, cb } of toHide) toggleIndicator(name, cb);
 }
 
 function toggleIndicator(name, checkbox) {
   const meta = indicatorMeta[name];
   if (!meta) return;
   meta.visible = checkbox.checked;
+  saveIndicatorVisibility();
 
   // Main-pane indicators just toggle visibility — no axis to drop.
   if (!meta.onSubPane) {
@@ -671,48 +713,90 @@ async function refreshOpenOrdersCount() {
       badge.textContent = n;
       badge.className = 'badge ms-1 ' + (n > 0 ? 'bg-warning text-dark' : 'bg-secondary');
       badge.title = '';
-      drawOrderPriceLines(data.orders || []);
+      drawOrderPriceLines(data.internal || []);
     }
   } catch(e) {}
 }
 
-// Draw a horizontal price line on the candle chart for each open order leg.
-// Green = limit price, red = stop trigger. Bracket orders get both.
-function drawOrderPriceLines(orders) {
+// Draw a horizontal price line on the candle chart for each open local
+// liveorder row. The local DB is the source of truth — every order the bot
+// places (or is about to place) is written there with limitprice/stopprice
+// before the Coinbase round-trip resolves, so the lines can appear
+// synchronously with the candle data without waiting for the open_orders
+// poll. Conventions:
+//   trailing pre-activation: orange dotted at limitprice (activation
+//     threshold) + red dashed at stopprice (hard stop on the exchange, if any)
+//   trailing post-activation: red dashed at stopprice (current trail stop)
+//   non-trailing limit:      green dashed at limitprice
+//   non-trailing stop:       red dashed at stopprice
+//   bracket (TP+SL):         green at limitprice, red at stopprice
+function drawOrderPriceLines(internal = []) {
   if (!candleSeries) return;
   for (const line of orderPriceLines) {
     try { candleSeries.removePriceLine(line); } catch(e) {}
   }
   orderPriceLines = [];
+  orderPriceLinePrices = [];
 
-  for (const o of orders) {
-    if (currentProductId && o.product_id && o.product_id !== currentProductId) continue;
-    const cfg = o.order_configuration || {};
-    const cfgVal = cfg[Object.keys(cfg)[0] || ''] || {};
-    const side = (o.side || '').toUpperCase();
-    const limit = parseFloat(cfgVal.limit_price);
-    const stop = parseFloat(cfgVal.stop_price || cfgVal.stop_trigger_price);
+  const addLine = (opts) => {
+    orderPriceLines.push(candleSeries.createPriceLine(opts));
+    orderPriceLinePrices.push(opts.price);
+  };
 
-    if (!isNaN(limit) && limit > 0) {
-      orderPriceLines.push(candleSeries.createPriceLine({
-        price: limit,
-        color: '#26a69a',
-        lineWidth: 1,
+  for (const r of internal) {
+    const tt = (r.tradetype || 'order').toString();
+    const trailing = (r.limittrailpercent || 0) > 0;
+    const activated = !!r.activated;
+    const lp = parseFloat(r.limitprice) || 0;
+    const sp = parseFloat(r.stopprice) || 0;
+
+    if (trailing && !activated) {
+      if (lp > 0) addLine({
+        price: lp, color: '#ffa726', lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Dotted,
+        axisLabelVisible: true, title: tt + ' activation',
+      });
+      if (sp > 0) addLine({
+        price: sp, color: '#ef5350', lineWidth: 1,
         lineStyle: LightweightCharts.LineStyle.Dashed,
-        axisLabelVisible: true,
-        title: side ? side + ' limit' : 'limit',
-      }));
-    }
-    if (!isNaN(stop) && stop > 0) {
-      orderPriceLines.push(candleSeries.createPriceLine({
-        price: stop,
-        color: '#ef5350',
-        lineWidth: 1,
+        axisLabelVisible: true, title: tt + ' hard stop',
+      });
+    } else if (trailing && activated) {
+      if (sp > 0) addLine({
+        price: sp, color: '#ef5350', lineWidth: 1,
         lineStyle: LightweightCharts.LineStyle.Dashed,
-        axisLabelVisible: true,
-        title: side ? side + ' stop' : 'stop',
-      }));
+        axisLabelVisible: true, title: tt + ' trail stop',
+      });
+    } else {
+      if (lp > 0) addLine({
+        price: lp, color: '#26a69a', lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Dashed,
+        axisLabelVisible: true, title: tt + ' limit',
+      });
+      if (sp > 0) addLine({
+        price: sp, color: '#ef5350', lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Dashed,
+        axisLabelVisible: true, title: tt + ' stop',
+      });
     }
+  }
+
+  // Feed the line prices into the hidden helper series so the Y-axis
+  // auto-scale extends to include them. Each price needs a unique
+  // timestamp (lightweight-charts indexes data by time). Spread them
+  // across the candle window; if there are no candles yet, skip.
+  if (orderPriceLinePrices.length && candleslist.length) {
+    const t0 = candleslist[0].timestamp;
+    const tN = candleslist[candleslist.length - 1].timestamp;
+    const span = Math.max(1, tN - t0);
+    const sorted = [...orderPriceLinePrices].sort((a, b) => a - b);
+    const data = sorted.map((p, i) => ({
+      time: t0 + Math.floor(span * i / Math.max(1, sorted.length - 1)),
+      value: p,
+    }));
+    try { priceLineScaleSeries.setData(data); } catch(e) {}
+  } else {
+    try { priceLineScaleSeries.setData([]); } catch(e) {}
   }
 }
 
@@ -736,7 +820,7 @@ async function refreshOpenOrdersModal() {
       badge.textContent = orders.length;
       badge.className = 'badge ms-1 ' + (orders.length > 0 ? 'bg-warning text-dark' : 'bg-secondary');
     }
-    drawOrderPriceLines(orders);
+    drawOrderPriceLines(internal);
 
     // Friendly names for Coinbase order-configuration keys + a hint about
     // what the "Limit" / "Trigger" cells mean for each type.
