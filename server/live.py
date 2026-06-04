@@ -48,6 +48,7 @@ class LiveTrader:
         self._base_increment = None
         self._price_increment = None  # price tick (from API price_increment, e.g. 5.0 for CDE BTC futures)
         self._contract_size = None
+        self._max_leverage = None   # exchange-side cap from get_product (INTX) or KNOWN_MAX_LEVERAGES; None if unknown
         self._product_venue = None  # 'FCM'/'CDE' (base_size = contract count) vs 'INTX' (base_size = base asset qty)
         self._base_currency = ''    # e.g. 'BTC' — for the status panel's "Base" field
         self._ws_client = None
@@ -866,7 +867,7 @@ class LiveTrader:
     # ------------------------------------------------------------------ product limits
 
     def _load_product_limits(self, product_id):
-        from coinbase_http import KNOWN_CONTRACT_SIZES
+        from coinbase_http import KNOWN_CONTRACT_SIZES, KNOWN_MAX_LEVERAGES
         cb = CoinbaseHTTP()
         try:
             product = cb.get_product(product_id)
@@ -897,7 +898,19 @@ class LiveTrader:
             ).upper()
             api_contract_size = float(future_details.get('contract_size') or 0)
             perp_details = future_details.get('perpetual_details') or {}
-            max_leverage = float(perp_details.get('max_leverage') or 0)
+            api_max_leverage = float(perp_details.get('max_leverage') or 0)
+
+            # Exchange-side leverage cap. INTX: API value is unreliable post-merger,
+            # mirror KNOWN_CONTRACT_SIZES treatment. FCM/CDE: API returns 0 (no
+            # perpetual_details), so we leave it None and let the broker reject
+            # an over-leveraged order rather than guess.
+            known_max_lev = KNOWN_MAX_LEVERAGES.get(product_id)
+            if self._product_venue == 'INTX' and known_max_lev is not None:
+                self._max_leverage = known_max_lev
+            elif api_max_leverage > 0:
+                self._max_leverage = api_max_leverage
+            else:
+                self._max_leverage = None
 
             # INTX: API's contract_size field is unreliable post-merger — use hardcoded specs.
             # FCM/CDE: API's contract_size is correct (e.g. 0.01 BTC for BIP-20DEC30-CDE).
@@ -926,7 +939,8 @@ class LiveTrader:
                 f"Product limits — venue:{self._product_venue} min:{self._min_base_size} "
                 f"max:{self._max_base_size} (base units) base_increment:{self._base_increment} "
                 f"price_increment:{self._price_increment} | "
-                f"contract_size:{self._contract_size} max_leverage:{max_leverage}x"
+                f"contract_size:{self._contract_size} "
+                f"max_leverage:{self._max_leverage if self._max_leverage is not None else 'unknown'}x"
             )
         except Exception:
             self._livelog(f"Could not load product limits:\n{traceback.format_exc()}")
@@ -1076,6 +1090,18 @@ class LiveTrader:
         cs = self._contract_size or 0.0
         return bs / cs if cs > 0 else bs
 
+    def _effective_leverage(self):
+        """Script's leverage, clamped to the exchange's max if known. Callers
+        get a silent clamp; _execute_order logs once per order intent when it
+        kicks in so the user knows their script asked for more than allowed."""
+        try:
+            lev = float(self.namespace.get('leverage', 1))
+        except (TypeError, ValueError):
+            lev = 1.0
+        if self._max_leverage and lev > self._max_leverage:
+            return self._max_leverage
+        return lev
+
     def _price_decimals(self) -> int:
         """Decimal places implied by price_increment (e.g. 5.0 → 0, 0.01 → 2)."""
         pi = self._price_increment or 0.01
@@ -1121,7 +1147,7 @@ class LiveTrader:
           - leverage defaults to "1.0" if omitted (wrong for perp strategies).
           - margin_type defaults to CROSS, explicit is safer.
           - retail_portfolio_id is deprecated for CDP keys, do NOT send."""
-        leverage = self.namespace.get('leverage', 1)
+        leverage = self._effective_leverage()
         try:
             lev_str = f"{float(leverage):.1f}"
         except Exception:
@@ -1369,33 +1395,31 @@ class LiveTrader:
             )
             stp = 0
 
-        leverage = self.namespace.get('leverage', 10)
+        script_leverage = self.namespace.get('leverage', 10)
+        leverage = self._effective_leverage()
+        if self._max_leverage and float(script_leverage) > self._max_leverage:
+            self._livelog(
+                f"Script leverage {script_leverage}x exceeds exchange max "
+                f"{self._max_leverage}x — clamping to {self._max_leverage}x"
+            )
         realposition = self.namespace.get('realposition', 0.0)
 
-        # Auto-size: min(broker's futures_buying_power, total_equity × script_leverage) × 0.99.
-        # `usd` is Coinbase's futures_buying_power — already a leveraged "max
-        # notional you can open right now" figure. If the script asks for less
-        # risk than the broker would allow, honor that; if the broker is more
-        # restrictive (pending transfers, margin holds), respect that cap so
-        # the order doesn't oversize and reject.
+        # Auto-size: free_margin × script_leverage × 0.99.
+        # `usd` is Coinbase's futures_buying_power = FREE MARGIN available
+        # for new positions (already nets out current margin holds + accounts
+        # for pending transfers). Multiplying by the script's leverage turns
+        # margin into the notional we can actually open. Falls back to raw
+        # equity if BP is missing.
         if amount == 0:
             usd = self.namespace.get('usd', 0)
             upnl = self.namespace.get('unrealized_pnl', 0.0)
             total_eq = self.namespace.get('total_equity', 0.0) or (usd + upnl)
-            scripted = total_eq * leverage
-            broker_cap = float(usd or 0)
-            if broker_cap > 0 and broker_cap < scripted:
-                amount_notional = broker_cap * 0.99
-                self._livelog(
-                    f"Auto-size: ${amount_notional:.2f} — capped by broker futures_buying_power "
-                    f"${broker_cap:.2f} (script asked for ${scripted:.2f} = total_eq ${total_eq:.2f} × {leverage}x)"
-                )
-            else:
-                amount_notional = scripted * 0.99
-                self._livelog(
-                    f"Auto-size: ${amount_notional:.2f} = total_eq ${total_eq:.2f} × {leverage}x × 0.99 "
-                    f"(broker futures_buying_power ${broker_cap:.2f})"
-                )
+            free_margin = float(usd or 0) or total_eq
+            amount_notional = free_margin * leverage * 0.99
+            self._livelog(
+                f"Auto-size: ${amount_notional:.2f} = free_margin ${free_margin:.2f} × {leverage}x × 0.99 "
+                f"(BP ${float(usd or 0):.2f}, total_eq ${total_eq:.2f})"
+            )
         else:
             amount_notional = amount
 
