@@ -1372,13 +1372,30 @@ class LiveTrader:
         leverage = self.namespace.get('leverage', 10)
         realposition = self.namespace.get('realposition', 0.0)
 
-        # Auto-size: total equity × leverage × 0.99 (use Coinbase-reported
-        # equity so we don't recompute locked/upnl with wrong contract_size).
+        # Auto-size: min(broker's futures_buying_power, total_equity × script_leverage) × 0.99.
+        # `usd` is Coinbase's futures_buying_power — already a leveraged "max
+        # notional you can open right now" figure. If the script asks for less
+        # risk than the broker would allow, honor that; if the broker is more
+        # restrictive (pending transfers, margin holds), respect that cap so
+        # the order doesn't oversize and reject.
         if amount == 0:
             usd = self.namespace.get('usd', 0)
             upnl = self.namespace.get('unrealized_pnl', 0.0)
             total_eq = self.namespace.get('total_equity', 0.0) or (usd + upnl)
-            amount_notional = total_eq * leverage * 0.99
+            scripted = total_eq * leverage
+            broker_cap = float(usd or 0)
+            if broker_cap > 0 and broker_cap < scripted:
+                amount_notional = broker_cap * 0.99
+                self._livelog(
+                    f"Auto-size: ${amount_notional:.2f} — capped by broker futures_buying_power "
+                    f"${broker_cap:.2f} (script asked for ${scripted:.2f} = total_eq ${total_eq:.2f} × {leverage}x)"
+                )
+            else:
+                amount_notional = scripted * 0.99
+                self._livelog(
+                    f"Auto-size: ${amount_notional:.2f} = total_eq ${total_eq:.2f} × {leverage}x × 0.99 "
+                    f"(broker futures_buying_power ${broker_cap:.2f})"
+                )
         else:
             amount_notional = amount
 
