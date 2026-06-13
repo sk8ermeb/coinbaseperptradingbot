@@ -163,22 +163,22 @@ class LiveTrader:
             wait = next_close - now
             self._livelog(f"Next candle close in {wait:.0f}s")
 
-            # Inter-candle wait. While we sleep, poll the ticker on a 5s
-            # cadence and run trailing-stop updates against fresh market
-            # prices — Coinbase has no native trailing support, so this
-            # thread is what keeps the trail moving between candle closes
-            # (and it runs whether or not anyone has the trading page open).
-            # self.running flips False on stop(), so the loop exits within
-            # one chunk.
+            # Inter-candle wait. The WS ticker channel (_handle_ticker_update)
+            # is the primary driver of trail updates — sub-second pushes
+            # straight from Coinbase. This REST poll is a fallback heartbeat
+            # at 30s so a silently-dropped WS doesn't freeze the trail, and
+            # it keeps _last_price warm if the WS hasn't pushed yet on a
+            # quiet book. sleep_chunk stays small so self.running flips
+            # land within ~1s of stop().
             deadline = time.time() + wait
-            poll_interval = 5
+            poll_interval = 30
+            sleep_chunk = 1
             next_poll = time.time()
             while time.time() < deadline and self.running:
-                now = time.time()
-                if now >= next_poll:
+                if time.time() >= next_poll:
                     self._poll_market_tick(product_id)
                     next_poll = time.time() + poll_interval
-                chunk = min(poll_interval, deadline - time.time())
+                chunk = min(sleep_chunk, deadline - time.time())
                 if chunk > 0:
                     time.sleep(chunk)
             if not self.running:
@@ -481,13 +481,23 @@ class LiveTrader:
             )
             self._log_event('fill:' + tt, evt)
         elif status in ('CANCELLED', 'EXPIRED'):
-            lutil.runupdate("UPDATE liveorder SET status='cancelled' WHERE id=?", (row['id'],))
-            self._livelog(f"Order {cb_id} {status} on exchange (filled {filled_size})")
-            # Trail-initiated cancels: log but don't notify, and drop the id
-            # from the set now that we've seen its terminal state.
             trail_owned = cb_id in self._trail_canceling_ids
             self._trail_canceling_ids.discard(cb_id)
-            self._log_event('cancel:' + tt, evt, notify=not trail_owned)
+            if trail_owned:
+                # The trail loop is mid cancel+replace for this row. Leaving
+                # status='open' is critical: the row's coinbase_order_id will
+                # be rewritten to the replacement id within milliseconds, and
+                # the eventual FILL on that new id would otherwise be
+                # short-circuited here as already-terminal — which is how
+                # both the fill:<tt> ntfy push and the history row's true
+                # final status went missing (works for Buy, Sell, and Exit
+                # alike — `_trail_canceling_ids` keys on cb_id, not direction).
+                self._livelog(f"Order {cb_id} {status} on exchange (trail cancel)")
+                self._log_event('cancel:' + tt, evt, notify=False)
+                return True
+            lutil.runupdate("UPDATE liveorder SET status='cancelled' WHERE id=?", (row['id'],))
+            self._livelog(f"Order {cb_id} {status} on exchange (filled {filled_size})")
+            self._log_event('cancel:' + tt, evt, notify=True)
         elif status == 'FAILED':
             lutil.runupdate("UPDATE liveorder SET status='failed' WHERE id=?", (row['id'],))
             self._livelog(f"Order {cb_id} FAILED on exchange")
@@ -614,11 +624,10 @@ class LiveTrader:
     # ------------------------------------------------------------------ trailing order management
 
     def _poll_market_tick(self, product_id):
-        """Background market poll run by the LiveTrader thread between candle
-        closes. Fetches the latest mid from Coinbase, caches it for the
-        frontend's /api/live/price endpoint, and runs any pending trail
-        updates. Errors are deduped so a flaky ticker doesn't spam the log
-        every 5 seconds."""
+        """Fallback REST poll for price/trail updates. WS ticker is the
+        primary driver; this runs every 30s as a heartbeat in case the WS
+        is dropping pushes, and warms _last_price on quiet books that haven't
+        produced a ticker push yet. Errors are deduped."""
         try:
             cb = CoinbaseHTTP()
             product = cb.get_product(product_id)
@@ -637,29 +646,22 @@ class LiveTrader:
                 # /api/live/price can return immediately even mid-trail.
                 self._last_price = price
                 self._last_price_time = time.time()
-                # Cheap pre-check: skip the trail lock dance entirely when
-                # no rows have a trail percent set.
-                rows = lutil.runselect(
-                    "SELECT 1 FROM liveorder WHERE scriptid=? AND status='open' "
-                    "AND limittrailpercent > 0 LIMIT 1",
-                    (self.scriptid,))
-                if rows:
-                    self.update_trailing(price)
+                self.update_trailing(price)
             self._last_market_poll_error = None
         except Exception as e:
             # Suppress repeated identical errors so one bad ticker call
-            # doesn't fill the log with 720 lines/hour.
+            # doesn't fill the log.
             msg = str(e)
             if getattr(self, '_last_market_poll_error', None) != msg:
                 self._livelog(f"Market poll fetch failed: {msg}")
                 self._last_market_poll_error = msg
 
     def update_trailing(self, price):
-        """Re-evaluate trailing orders against a fresh market price. Called
-        from the price-poll API path on every market update so trails track
-        intra-candle moves instead of only updating at candle close. Skips
-        cleanly if the trader isn't fully started or another update is
-        already in flight (the next poll picks up the slack)."""
+        """Re-evaluate trailing orders against a fresh market price. The hot
+        path: called from every WS ticker push (sub-second), from the 30s
+        REST fallback, and from /api/live/price. Skips cleanly if the trader
+        isn't started, the row set has no trails, or another update is mid-
+        flight (the next push picks it up milliseconds later)."""
         if not self.running or not self.pair:
             return
         try:
@@ -667,6 +669,15 @@ class LiveTrader:
         except (TypeError, ValueError):
             return
         if price <= 0:
+            return
+        # Cheap pre-check first — WS ticker can fire many times per second
+        # on a busy book and most scripts have no open trail rows. Avoids
+        # the lock dance and the full SELECT in _update_trailing_orders.
+        rows = lutil.runselect(
+            "SELECT 1 FROM liveorder WHERE scriptid=? AND status='open' "
+            "AND limittrailpercent > 0 LIMIT 1",
+            (self.scriptid,))
+        if not rows:
             return
         if not self._trail_lock.acquire(blocking=False):
             return
@@ -957,9 +968,10 @@ class LiveTrader:
     # ------------------------------------------------------------------ websocket: fill/cancel notifications
 
     def _start_ws(self, product_id):
-        """Open a WSClient on Coinbase's 'user' channel for this product so we
-        get pushed FILLED/CANCELLED order events in real time instead of waiting
-        for the next candle tick. The SDK runs its own listener thread."""
+        """Open a WSClient subscribed to 'user' (fill/cancel pushes) and
+        'ticker' (sub-second price pushes that drive trail updates) for this
+        product. The SDK runs its own listener thread and re-sends both
+        subscriptions on reconnect."""
         # Clean up any prior client first (e.g. restart from _run_with_restart).
         self._stop_ws()
         try:
@@ -967,20 +979,21 @@ class LiveTrader:
             key_name = lutil.getkeyval('cbkey')
             key_secret = lutil.getkeyval('cbsecret')
             if not key_name or not key_secret:
-                self._livelog("WS: skipping fill subscription — no credentials")
+                self._livelog("WS: skipping subscriptions — no credentials")
                 return
             key_secret = key_secret.replace('\\n', '\n').strip()
             self._ws_client = WSClient(
                 api_key=key_name,
                 api_secret=key_secret,
                 on_message=self._on_ws_message,
-                on_open=lambda: self._livelog(f"WS: user channel connected for {product_id}"),
-                on_close=lambda: self._livelog("WS: user channel disconnected"),
+                on_open=lambda: self._livelog(f"WS: user+ticker connected for {product_id}"),
+                on_close=lambda: self._livelog("WS: disconnected"),
                 retry=True,
                 verbose=False,
             )
             self._ws_client.open()
             self._ws_client.user(product_ids=[product_id])
+            self._ws_client.ticker(product_ids=[product_id])
             self._ws_product_id = product_id
         except Exception:
             self._livelog(f"WS: failed to start:\n{traceback.format_exc()}")
@@ -998,13 +1011,41 @@ class LiveTrader:
     def _on_ws_message(self, raw_msg):
         try:
             data = json.loads(raw_msg) if isinstance(raw_msg, str) else raw_msg
-            if data.get('channel') != 'user':
-                return
-            for ev in (data.get('events') or []):
-                for order in (ev.get('orders') or []):
-                    self._handle_order_update(order)
+            channel = data.get('channel')
+            if channel == 'user':
+                for ev in (data.get('events') or []):
+                    for order in (ev.get('orders') or []):
+                        self._handle_order_update(order)
+            elif channel == 'ticker':
+                for ev in (data.get('events') or []):
+                    for t in (ev.get('tickers') or []):
+                        self._handle_ticker_update(t)
         except Exception:
             self._livelog(f"WS: message handler error:\n{traceback.format_exc()}")
+
+    def _handle_ticker_update(self, ticker):
+        """Ticker push — sub-second price feed that drives the trail. Warms
+        _last_price so /api/live/price serves from cache, then re-evaluates
+        trails. update_trailing's non-blocking lock + cheap pre-check absorb
+        the burst rate on active books."""
+        try:
+            bid = float(ticker.get('best_bid') or 0)
+            ask = float(ticker.get('best_ask') or 0)
+            if bid > 0 and ask > 0:
+                price = (bid + ask) / 2
+            elif bid > 0:
+                price = bid
+            elif ask > 0:
+                price = ask
+            else:
+                price = float(ticker.get('price') or 0)
+        except (TypeError, ValueError):
+            return
+        if price <= 0:
+            return
+        self._last_price = price
+        self._last_price_time = time.time()
+        self.update_trailing(price)
 
     def _handle_order_update(self, order):
         """Dedupe by (order_id, status); only emit on FILLED/CANCELLED-class

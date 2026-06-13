@@ -452,9 +452,10 @@ async def live_price(session: str = Depends(require_session)):
     import time as _time
     trader = live_module.get_trader()
 
-    # Prefer the cache populated by the LiveTrader's 5s market poll. The
-    # backend is already hitting Coinbase on its own cadence; reading the
-    # cache here means the frontend doesn't double up the request.
+    # Prefer the cache populated by the WS ticker push (primary) or the 30s
+    # REST fallback. The backend is already getting sub-second price updates
+    # on its own cadence; reading the cache here means the frontend doesn't
+    # double up the request.
     if trader and trader.running and trader._last_price > 0:
         if _time.time() - trader._last_price_time < 10:
             return JSONResponse({'price': round(trader._last_price, 2),
