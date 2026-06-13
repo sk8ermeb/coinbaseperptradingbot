@@ -35,6 +35,11 @@ class LiveTrader:
         # The WS `cancel` event and the reconciliation `cancel:<tt>` event
         # consult this set so trail churn doesn't spam push notifications.
         self._trail_canceling_ids = set()
+        # liveorder row ids currently being retried by a background thread
+        # after a place rejection. The main trail loop skips these so a fresh
+        # peak update doesn't race the retry sequence. Discarded when the
+        # retry resolves (either a successful place or a final gaveup).
+        self._trail_retrying_rows = set()
         # Latest market mid cached by the backend's 5s poll. The /api/live/price
         # endpoint reads from here so the frontend doesn't have to hit Coinbase
         # itself when the trader thread is already polling.
@@ -482,18 +487,36 @@ class LiveTrader:
             self._log_event('fill:' + tt, evt)
         elif status in ('CANCELLED', 'EXPIRED'):
             trail_owned = cb_id in self._trail_canceling_ids
-            self._trail_canceling_ids.discard(cb_id)
+            # NOTE: do NOT discard from `_trail_canceling_ids` here. A single
+            # cancelled cb_id typically generates TWO trips through this code
+            # path (the WS user-channel push AND the get_order poll inside
+            # `_read_account_state` that the WS handler then triggers). If we
+            # discarded on the first trip, the second trip saw trail_owned=False
+            # and terminally cancelled the row — which corrupted local↔Coinbase
+            # state when the trail loop had already moved on to a replacement
+            # and would also break a pending retry (the row's cb_id is still
+            # the cancelled one until the retry succeeds or `_start_trail_retry`
+            # clears it). The trail loop and the retry path discard the cb_id
+            # explicitly once they're done with it.
             if trail_owned:
                 # The trail loop is mid cancel+replace for this row. Leaving
                 # status='open' is critical: the row's coinbase_order_id will
-                # be rewritten to the replacement id within milliseconds, and
-                # the eventual FILL on that new id would otherwise be
-                # short-circuited here as already-terminal — which is how
-                # both the fill:<tt> ntfy push and the history row's true
-                # final status went missing (works for Buy, Sell, and Exit
-                # alike — `_trail_canceling_ids` keys on cb_id, not direction).
+                # be rewritten to the replacement id within milliseconds (or
+                # cleared by `_start_trail_retry` if the replace was rejected
+                # and a retry was scheduled), and the eventual FILL on that
+                # new id would otherwise be short-circuited here as already-
+                # terminal — which is how both the fill:<tt> ntfy push and the
+                # history row's true final status went missing.
+                #
+                # Use the `trailcancel:` prefix instead of `cancel:` so this
+                # cancel-half of a trail cancel+replace cycle stays out of the
+                # chart event markers (the /live/candles endpoint filters on
+                # user:/create:/fill:/cancel: prefixes). It still flows to
+                # /live/history (no prefix filter) so the user can see the
+                # full audit trail when they want it. Real, user-meaningful
+                # cancels still use `cancel:` and still show on the chart.
                 self._livelog(f"Order {cb_id} {status} on exchange (trail cancel)")
-                self._log_event('cancel:' + tt, evt, notify=False)
+                self._log_event('trailcancel:' + tt, evt, notify=False)
                 return True
             lutil.runupdate("UPDATE liveorder SET status='cancelled' WHERE id=?", (row['id'],))
             self._livelog(f"Order {cb_id} {status} on exchange (filled {filled_size})")
@@ -738,6 +761,11 @@ class LiveTrader:
         pos = self.namespace.get('realposition', 0)
 
         for row in rows:
+            # A background retry thread owns this row right now — leave it
+            # alone so a fresh peak update doesn't race the retry sequence.
+            if row['id'] in self._trail_retrying_rows:
+                continue
+
             ltp = row['limittrailpercent'] or 0
             tradetype = row['tradetype']
             activation = float(row['limitprice'] or 0)
@@ -828,9 +856,18 @@ class LiveTrader:
                 # it triggers don't fire push notifications (trail churn).
                 self._trail_canceling_ids.add(row['coinbase_order_id'])
                 if not self._cancel_and_confirm(cb, row['coinbase_order_id']):
+                    # Couldn't confirm the cancel (timeout, exchange rejection,
+                    # or transient network error). Release the cb_id from the
+                    # in-flight set so the reconciliation/WS path is allowed
+                    # to mark the row terminally if the order does eventually
+                    # transition to CANCELLED/FILLED on Coinbase — otherwise
+                    # the row would be stuck in 'open' forever with a stale
+                    # cb_id pointing at a terminal order.
+                    self._trail_canceling_ids.discard(row['coinbase_order_id'])
                     self._livelog(
                         f"Trail: cancel of {row['coinbase_order_id']} not confirmed "
-                        f"— skipping replace this cycle (will retry next poll)"
+                        f"— skipping replace this cycle (will retry next poll). "
+                        f"Released from in-flight set so reconciliation can act."
                     )
                     continue
 
@@ -854,15 +891,45 @@ class LiveTrader:
                     }
                 })
             except Exception:
-                self._livelog(f"Trail place error:\n{traceback.format_exc()}")
+                tb = traceback.format_exc()
+                self._livelog(f"Trail place error:\n{tb}")
+                # Treat a thrown exception the same as a Coinbase-side rejection:
+                # we already cancelled the prior order, so handing off to the
+                # retry path keeps local state consistent.
+                self._start_trail_retry(
+                    row['id'], product_id, cb_side, stop_dir, kind,
+                    last_failure=('EXCEPTION', tb.splitlines()[-1][:300], ''),
+                    cancelled_cb_id=(row['coinbase_order_id'] or ''),
+                    original_intent=intent,
+                )
                 continue
-            if not self._check_order_response(resp, intent):
+            ok, reason, message, raw = self._parse_order_response(resp)
+            if not ok:
+                # Log the rejection (same as the synchronous path used to),
+                # then start the retry sequence. The prior exchange order is
+                # already gone — clear local state so the DB matches Coinbase
+                # and the WS/reconciliation paths don't terminally cancel the
+                # row out from under the retry thread.
+                self._notify_order_error(intent, reason, message, raw)
+                self._start_trail_retry(
+                    row['id'], product_id, cb_side, stop_dir, kind,
+                    last_failure=(reason, message, raw),
+                    cancelled_cb_id=(row['coinbase_order_id'] or ''),
+                    original_intent=intent,
+                )
                 continue
             new_cb_id = self._get_cb_order_id(resp, new_cb_id, product_id) or new_cb_id
 
             lutil.runupdate(
                 "UPDATE liveorder SET coinbase_order_id=?, stopprice=?, limitprice=? WHERE id=?",
                 (new_cb_id, new_stop, new_stop, row['id']))
+            # Replacement is on the book — release the OLD cb_id from the
+            # "in-flight cancel" set so the set doesn't grow unbounded across
+            # trail churn. Any further WS events for the old id are now safe
+            # to terminally cancel (they have no row to corrupt — the row
+            # points at `new_cb_id`).
+            if row['coinbase_order_id']:
+                self._trail_canceling_ids.discard(row['coinbase_order_id'])
             self._livelog(intent)
             self._log_event('trail:' + tradetype, {
                 'coinbase_order_id': new_cb_id,
@@ -874,6 +941,199 @@ class LiveTrader:
                 'market_price': float(price),
                 'first_placement': first_placement,
             }, notify=False)
+
+    # ------------------------------------------------------------------ trail retry
+
+    # Delay schedule between trail-place attempts when Coinbase rejects. The
+    # first attempt is the synchronous call from `_update_trailing_orders`; the
+    # background retry thread then sleeps each of these in turn before the
+    # next attempt. Total = up to 4 attempts (1 + 3 retries) over ~30 seconds.
+    _TRAIL_RETRY_DELAYS = (3, 7, 20)
+
+    def _start_trail_retry(self, row_id, product_id, cb_side, stop_dir, kind,
+                           last_failure, cancelled_cb_id, original_intent):
+        """Kick off the background retry thread after the synchronous trail
+        place call has been rejected by Coinbase. By the time we get here the
+        prior exchange order (if any) has already been confirmed cancelled,
+        so the local row's `coinbase_order_id` and `stopprice` are stale —
+        clear them so:
+          • reconciliation in `_read_account_state` skips the row (no cb_id)
+            instead of marking it terminally cancelled
+          • the next main-loop trail tick sees `first_placement=True` and
+            wouldn't double-place if the retry races (the row id is also in
+            `_trail_retrying_rows`, which the main loop skips on)
+        """
+        if row_id in self._trail_retrying_rows:
+            # Already retrying — shouldn't happen since the main loop skips
+            # in-retry rows, but guard against a re-entrant race anyway.
+            self._livelog(f"Trail retry: row {row_id} already in retry, ignoring duplicate start")
+            return
+        self._trail_retrying_rows.add(row_id)
+        try:
+            lutil.runupdate(
+                "UPDATE liveorder SET coinbase_order_id='', stopprice=0 WHERE id=?",
+                (row_id,))
+        except Exception:
+            self._livelog(f"Trail retry: failed to clear local state for row {row_id}:\n{traceback.format_exc()}")
+        # The cancelled cb_id no longer points at any tracked row — drop it
+        # from the in-flight cancel set so future WS events for that id take
+        # the normal terminal path (no-op for the row, no notification spam).
+        if cancelled_cb_id:
+            self._trail_canceling_ids.discard(cancelled_cb_id)
+        reason, message, raw = last_failure
+        self._livelog(
+            f"Trail retry: scheduling row {row_id} after first rejection "
+            f"[{reason}] {message} — original intent: {original_intent}. "
+            f"Retry delays: {self._TRAIL_RETRY_DELAYS}s (4 attempts total)."
+        )
+        self._log_event('trail-retry:start', {
+            'liveorder_id': row_id,
+            'cancelled_cb_id': cancelled_cb_id,
+            'first_failure_reason': reason,
+            'first_failure_message': message,
+            'first_failure_raw': raw,
+            'original_intent': original_intent,
+            'delays_seconds': list(self._TRAIL_RETRY_DELAYS),
+        }, notify=False)
+        threading.Thread(
+            target=self._retry_trail_placement,
+            args=(row_id, product_id, cb_side, stop_dir, kind, last_failure),
+            daemon=True,
+        ).start()
+
+    def _retry_trail_placement(self, row_id, product_id, cb_side, stop_dir, kind, last_failure):
+        """Background worker that re-attempts the trail stop_limit placement
+        on the delay schedule. Each attempt recomputes `new_stop` from the
+        current peak in the DB so the retry tracks the market that's been
+        moving while we slept. If all attempts fail, mark the row cancelled
+        and emit `cancel:gaveup:<tradetype>` with the last Coinbase error so
+        the user knows the trail is no longer protecting the position."""
+        cb = CoinbaseHTTP()
+        try:
+            for attempt_idx, delay in enumerate(self._TRAIL_RETRY_DELAYS, start=2):
+                # Sleep in small chunks so a stop() call can short-circuit the
+                # delay (avoids the worst case of holding for 20s after stop).
+                slept = 0.0
+                while slept < delay and self.running:
+                    time.sleep(min(0.5, delay - slept))
+                    slept += 0.5
+                if not self.running:
+                    self._livelog(f"Trail retry: trader stopped, aborting row {row_id}")
+                    return
+
+                rows = lutil.runselect(
+                    "SELECT * FROM liveorder WHERE id=? AND status='open'",
+                    (row_id,))
+                if not rows:
+                    self._livelog(
+                        f"Trail retry: row {row_id} no longer open — aborting retry "
+                        f"(likely cancelled by user or position closed)"
+                    )
+                    return
+                row = rows[0]
+                tradetype = row['tradetype'] or 'trail'
+                ltp = row['limittrailpercent'] or 0
+                peak = float(row['peak_price'] or 0)
+                if ltp <= 0 or peak <= 0:
+                    self._livelog(
+                        f"Trail retry: row {row_id} has invalid trail state "
+                        f"(ltp={ltp}, peak={peak}) — aborting retry"
+                    )
+                    return
+
+                if kind == 'upside':
+                    new_stop = peak * (1.0 - ltp)
+                else:
+                    new_stop = peak * (1.0 + ltp)
+
+                cs = self._contract_size or 1.0
+                amount_btc = float(row['amount']) * cs
+                base_size = self._format_base_size(self._round_to_increment(amount_btc))
+                new_cb_id = str(uuid.uuid4())
+                intent = (f"TRAIL RETRY {attempt_idx}/4 (after {delay}s) {cb_side} "
+                          f"stop_limit {base_size} @ {new_stop:.2f} "
+                          f"[{tradetype} peak {peak:.2f} trail:{ltp*100:.2f}%]")
+                self._livelog(intent)
+
+                try:
+                    resp = self._cb_create_order(cb, new_cb_id, product_id, cb_side, {
+                        'stop_limit_stop_limit_gtc': {
+                            'base_size': base_size,
+                            'limit_price': self._format_price(new_stop),
+                            'stop_price': self._format_stop_trigger_price(new_stop, cb_side),
+                            'stop_direction': stop_dir,
+                        }
+                    })
+                except Exception:
+                    tb = traceback.format_exc()
+                    self._livelog(
+                        f"Trail retry {attempt_idx}/4 EXCEPTION for row {row_id}:\n{tb}"
+                    )
+                    last_failure = ('EXCEPTION', tb.splitlines()[-1][:300], '')
+                    continue
+
+                ok, reason, message, raw = self._parse_order_response(resp)
+                if not ok:
+                    self._notify_order_error(intent, reason, message, raw)
+                    self._livelog(
+                        f"Trail retry {attempt_idx}/4 REJECTED for row {row_id}: [{reason}] {message}"
+                    )
+                    last_failure = (reason, message, raw)
+                    continue
+
+                new_cb_id = self._get_cb_order_id(resp, new_cb_id, product_id) or new_cb_id
+                lutil.runupdate(
+                    "UPDATE liveorder SET coinbase_order_id=?, stopprice=?, limitprice=? WHERE id=?",
+                    (new_cb_id, new_stop, new_stop, row_id))
+                self._livelog(
+                    f"Trail retry {attempt_idx}/4 SUCCEEDED for row {row_id}: {intent}"
+                )
+                self._log_event('trail-retry:success', {
+                    'liveorder_id': row_id,
+                    'coinbase_order_id': new_cb_id,
+                    'tradetype': tradetype,
+                    'attempt': attempt_idx,
+                    'new_stopprice': float(new_stop),
+                    'peak_price': float(peak),
+                    'limittrailpercent': float(ltp),
+                }, notify=False)
+                return
+
+            # All four attempts failed. Mark row cancelled so local DB matches
+            # Coinbase (no resting order), and emit the gaveup event so the
+            # user gets a push notification with the last failure reason.
+            rows = lutil.runselect("SELECT * FROM liveorder WHERE id=?", (row_id,))
+            row = rows[0] if rows else None
+            tradetype = (row['tradetype'] if row else None) or 'trail'
+            reason, message, raw = last_failure
+            try:
+                lutil.runupdate(
+                    "UPDATE liveorder SET status='cancelled' WHERE id=?",
+                    (row_id,))
+            except Exception:
+                self._livelog(f"Trail giveup: failed to mark row {row_id} cancelled:\n{traceback.format_exc()}")
+            self._livelog(
+                f"Trail GAVE UP for row {row_id} ({tradetype}) after 4 attempts "
+                f"({len(self._TRAIL_RETRY_DELAYS) + 1} total: 1 initial + 3 retries). "
+                f"Last failure: [{reason}] {message}. Row marked CANCELLED — "
+                f"position is no longer protected by this trail."
+            )
+            self._log_event('cancel:gaveup:' + tradetype, {
+                'liveorder_id': row_id,
+                'tradetype': tradetype,
+                'amount': float(row['amount']) if row else 0,
+                'limittrailpercent': float(row['limittrailpercent']) if row else 0,
+                'peak_price': float(row['peak_price']) if row else 0,
+                'attempts': 1 + len(self._TRAIL_RETRY_DELAYS),
+                'last_failure_reason': reason,
+                'last_failure_message': message,
+                'last_failure_raw': raw,
+                'final_status': 'CANCELLED',
+            }, notify=True)
+        except Exception:
+            self._livelog(f"Trail retry worker crash for row {row_id}:\n{traceback.format_exc()}")
+        finally:
+            self._trail_retrying_rows.discard(row_id)
 
     # ------------------------------------------------------------------ product limits
 
@@ -1079,10 +1339,21 @@ class LiveTrader:
         if rows:
             self._emit_order_terminal_event(rows[0], status, order)
         else:
-            event_type = 'fill' if status == 'FILLED' else 'cancel'
+            # Trail-owned cancels for ids whose row already rotated to a new
+            # cb_id get the `trailcancel` prefix so they stay out of chart
+            # markers (kept in /live/history for the audit trail). Real
+            # cancels keep `cancel` so they DO show on the chart.
+            is_trail_cancel = (status != 'FILLED' and
+                               order_id in self._trail_canceling_ids)
+            if status == 'FILLED':
+                event_type = 'fill'
+            elif is_trail_cancel:
+                event_type = 'trailcancel'
+            else:
+                event_type = 'cancel'
             # Suppress notification when the cancel was initiated by the
             # trail loop — the user doesn't want a ping every trail step.
-            notify = not (event_type == 'cancel' and order_id in self._trail_canceling_ids)
+            notify = not is_trail_cancel
             self._log_event(event_type, {
                 'order_id': order_id, 'product_id': product, 'side': side,
                 'status': status, 'filled': str(filled), 'avg_price': str(avg_price),
@@ -1213,21 +1484,23 @@ class LiveTrader:
             return 0.0
         return base_size_f
 
-    def _check_order_response(self, resp, intent_label):
-        """Inspect a Coinbase create_order response. On rejection, log a clear
-        error line and fire an `error:order_rejected` event (for push). Returns
-        True on success, False on failure — callers should bail on False so the
-        success-style log and `create:*` event do not fire for a phantom order."""
+    def _parse_order_response(self, resp):
+        """Parse a Coinbase create_order response without logging. Returns
+        (ok, reason, message, raw_excerpt). Used by both the standard logging
+        wrapper (`_check_order_response`) and the trail retry path which needs
+        to remember the last failure to put on the gaveup event."""
         if not isinstance(resp, dict):
-            self._notify_order_error(intent_label, 'INVALID_RESPONSE', str(resp)[:300])
-            return False
+            return False, 'INVALID_RESPONSE', str(resp)[:300], ''
         # API-level error (auth, permission, malformed request) — top-level
         # 'error' key with no success_response.
         if resp.get('error') and not resp.get('success_response'):
             reason = resp.get('error') or 'UNKNOWN'
             message = resp.get('message') or resp.get('error_details') or ''
-            self._notify_order_error(intent_label, reason, message)
-            return False
+            try:
+                raw = json.dumps(resp)[:600]
+            except Exception:
+                raw = str(resp)[:600]
+            return False, reason, message, raw
         # Order-level rejection — success: false with error_response populated.
         if resp.get('success') is False:
             err = resp.get('error_response') or {}
@@ -1236,14 +1509,31 @@ class LiveTrader:
                       or err.get('preview_failure_reason')
                       or 'UNKNOWN')
             message = err.get('message') or err.get('error_details') or ''
-            self._notify_order_error(intent_label, reason, message)
-            return False
-        return True
+            try:
+                raw = json.dumps(resp)[:600]
+            except Exception:
+                raw = str(resp)[:600]
+            return False, reason, message, raw
+        return True, '', '', ''
 
-    def _notify_order_error(self, intent_label, reason, message):
-        self._livelog(f"ORDER REJECTED [{reason}] {intent_label}: {message}")
+    def _check_order_response(self, resp, intent_label):
+        """Inspect a Coinbase create_order response. On rejection, log a clear
+        error line and fire an `error:order_rejected` event (for push). Returns
+        True on success, False on failure — callers should bail on False so the
+        success-style log and `create:*` event do not fire for a phantom order."""
+        ok, reason, message, raw = self._parse_order_response(resp)
+        if not ok:
+            self._notify_order_error(intent_label, reason, message, raw)
+        return ok
+
+    def _notify_order_error(self, intent_label, reason, message, raw=''):
+        if raw:
+            self._livelog(f"ORDER REJECTED [{reason}] {intent_label}: {message} | raw={raw}")
+        else:
+            self._livelog(f"ORDER REJECTED [{reason}] {intent_label}: {message}")
         self._log_event('error:order_rejected', {
             'intent': intent_label, 'reason': reason, 'message': message,
+            'raw_response': raw,
         })
 
     def _get_cb_order_id(self, resp, client_order_id, product_id):
