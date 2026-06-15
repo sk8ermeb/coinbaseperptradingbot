@@ -910,7 +910,7 @@ class LiveTrader:
                 # already gone — clear local state so the DB matches Coinbase
                 # and the WS/reconciliation paths don't terminally cancel the
                 # row out from under the retry thread.
-                self._notify_order_error(intent, reason, message, raw)
+                self._notify_order_error(intent, reason, message, raw, notify=False)
                 self._start_trail_retry(
                     row['id'], product_id, cb_side, stop_dir, kind,
                     last_failure=(reason, message, raw),
@@ -1074,7 +1074,7 @@ class LiveTrader:
 
                 ok, reason, message, raw = self._parse_order_response(resp)
                 if not ok:
-                    self._notify_order_error(intent, reason, message, raw)
+                    self._notify_order_error(intent, reason, message, raw, notify=False)
                     self._livelog(
                         f"Trail retry {attempt_idx}/4 REJECTED for row {row_id}: [{reason}] {message}"
                     )
@@ -1526,15 +1526,25 @@ class LiveTrader:
             self._notify_order_error(intent_label, reason, message, raw)
         return ok
 
-    def _notify_order_error(self, intent_label, reason, message, raw=''):
+    def _notify_order_error(self, intent_label, reason, message, raw='', notify=True):
+        # `notify=False` is used by the trail cancel+replace path for
+        # intermediate failures. A rejection there is routinely transient —
+        # Coinbase's margin-release lag after the (confirmed) cancel briefly
+        # double-counts the freed order's reserved margin, so the replace can
+        # be rejected with PREVIEW_INSUFFICIENT_FUNDS_FOR_FUTURES even though
+        # funds are fine — and the background retry usually re-places within
+        # seconds. We still livelog and record the event for forensics, but
+        # suppress the push so the user is only alerted if all attempts are
+        # ultimately exhausted (the `cancel:gaveup` event, which always notifies).
+        prefix = "ORDER REJECTED" if notify else "ORDER REJECTED (retrying)"
         if raw:
-            self._livelog(f"ORDER REJECTED [{reason}] {intent_label}: {message} | raw={raw}")
+            self._livelog(f"{prefix} [{reason}] {intent_label}: {message} | raw={raw}")
         else:
-            self._livelog(f"ORDER REJECTED [{reason}] {intent_label}: {message}")
+            self._livelog(f"{prefix} [{reason}] {intent_label}: {message}")
         self._log_event('error:order_rejected', {
             'intent': intent_label, 'reason': reason, 'message': message,
             'raw_response': raw,
-        })
+        }, notify=notify)
 
     def _get_cb_order_id(self, resp, client_order_id, product_id):
         """Extract Coinbase order_id from response dict; fall back to open-order lookup."""
