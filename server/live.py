@@ -78,11 +78,18 @@ class LiveTrader:
         self.thread = threading.Thread(target=self._run_with_restart, daemon=True)
         self.thread.start()
 
-    def stop(self):
+    def stop(self, user_initiated=True):
+        # user_initiated=True  -> user clicked Stop; clear the persisted intent
+        #                         flag so the trader stays off across restarts.
+        # user_initiated=False -> the process is shutting down (e.g. Ctrl+C);
+        #                         leave 'live_running' set so maybe_autoresume()
+        #                         brings the trader back on the next launch.
         self.running = False
-        lutil.setkeyval('live_running', 'false')
+        if user_initiated:
+            lutil.setkeyval('live_running', 'false')
         self._stop_ws()
-        self._livelog("Live trader stopped by user")
+        self._livelog("Live trader stopped by user" if user_initiated
+                      else "Live trader paused for shutdown — will auto-resume on restart")
 
     # ------------------------------------------------------------------ logging
 
@@ -2308,11 +2315,11 @@ def start_trader(scriptid: int) -> LiveTrader:
         return _trader
 
 
-def stop_trader():
+def stop_trader(user_initiated=True):
     global _trader
     with _lock:
         if _trader:
-            _trader.stop()
+            _trader.stop(user_initiated=user_initiated)
 
 
 def maybe_autoresume():

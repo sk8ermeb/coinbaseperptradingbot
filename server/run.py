@@ -17,7 +17,9 @@ async def lifespan(app: FastAPI):
     ntfy_util.ensure_uuid()
     live_module.maybe_autoresume()
     yield
-    live_module.stop_trader()
+    # Ctrl+C / process shutdown: pause the trader thread but keep the persisted
+    # 'live_running' intent so maybe_autoresume() restarts it on the next launch.
+    live_module.stop_trader(user_initiated=False)
 
 app = FastAPI(lifespan=lifespan)
 
