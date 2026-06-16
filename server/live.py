@@ -33,8 +33,17 @@ class LiveTrader:
         self._trail_lock = threading.Lock()
         # Order ids cancelled by the trail loop as part of a reposition.
         # The WS `cancel` event and the reconciliation `cancel:<tt>` event
-        # consult this set so trail churn doesn't spam push notifications.
+        # consult this set (via _is_trail_cancel) so trail churn doesn't spam
+        # push notifications. Holds ids whose cancel+replace is *in flight*.
         self._trail_canceling_ids = set()
+        # Ids that have already been rotated out (replacement is on the book)
+        # or retired into a retry, mapped to the monotonic time they left the
+        # in-flight set. Coinbase's WS CANCELLED push for the old id arrives
+        # asynchronously — often after the replacement has landed — so we must
+        # keep recognizing the id as trail-owned for a grace window or the
+        # delayed push is misclassified as a real user cancel and fires a
+        # spurious notification on every trail step. Pruned in the trail loop.
+        self._trail_recent_cancels = {}
         # liveorder row ids currently being retried by a background thread
         # after a place rejection. The main trail loop skips these so a fresh
         # peak update doesn't race the retry sequence. Discarded when the
@@ -486,7 +495,7 @@ class LiveTrader:
             )
             self._log_event('fill:' + tt, evt)
         elif status in ('CANCELLED', 'EXPIRED'):
-            trail_owned = cb_id in self._trail_canceling_ids
+            trail_owned = self._is_trail_cancel(cb_id)
             # NOTE: do NOT discard from `_trail_canceling_ids` here. A single
             # cancelled cb_id typically generates TWO trips through this code
             # path (the WS user-channel push AND the get_order poll inside
@@ -711,6 +720,53 @@ class LiveTrader:
         finally:
             self._trail_lock.release()
 
+    # How long (seconds) a rotated-out/retired trail-cancel id keeps
+    # suppressing notifications after it leaves the in-flight set. Must
+    # comfortably exceed the worst-case WS push delay (sub-second normally,
+    # but up to a WS reconnect / the 30s reconciliation poll if the socket
+    # dropped). 120s is generous headroom.
+    _TRAIL_CANCEL_GRACE = 120.0
+
+    def _is_trail_cancel(self, cb_id):
+        """True if `cb_id`'s cancel was initiated by the trail loop — either
+        its cancel+replace is still in flight, or it was rotated out / retired
+        within the grace window. The delayed WS CANCELLED push for a rotated
+        id must still be recognized here, otherwise it's misclassified as a
+        real user cancel and fires a spurious push notification every trail
+        step."""
+        if not cb_id:
+            return False
+        if cb_id in self._trail_canceling_ids:
+            return True
+        ts = self._trail_recent_cancels.get(cb_id)
+        if ts is None:
+            return False
+        if time.monotonic() - ts > self._TRAIL_CANCEL_GRACE:
+            self._trail_recent_cancels.pop(cb_id, None)
+            return False
+        return True
+
+    def _retire_trail_cancel_id(self, cb_id):
+        """Move `cb_id` out of the in-flight cancel set into the time-bounded
+        recent-cancels map. Used once the replacement order is on the book (or
+        the row has been handed to a retry): the old id is no longer active,
+        but its WS CANCELLED push may still be in transit and must keep being
+        suppressed for the grace window."""
+        if not cb_id:
+            return
+        self._trail_canceling_ids.discard(cb_id)
+        self._trail_recent_cancels[cb_id] = time.monotonic()
+
+    def _prune_trail_recent_cancels(self):
+        """Drop expired entries so the recent-cancels map can't grow unbounded
+        across long-lived trail churn."""
+        if not self._trail_recent_cancels:
+            return
+        now = time.monotonic()
+        for cid in [c for c, ts in self._trail_recent_cancels.items()
+                    if now - ts > self._TRAIL_CANCEL_GRACE]:
+            self._trail_recent_cancels.pop(cid, None)
+
     def _trail_direction(self, tradetype, pos):
         """Resolve a trail row to one of two symmetric mechanics.
 
@@ -751,6 +807,7 @@ class LiveTrader:
             monotonically (up for upside, down for downside). The original
             hard stop is intentionally NOT used as a floor after
             activation."""
+        self._prune_trail_recent_cancels()
         rows = lutil.runselect(
             "SELECT * FROM liveorder WHERE scriptid=? AND status='open' "
             "AND limittrailpercent > 0",
@@ -923,13 +980,15 @@ class LiveTrader:
             lutil.runupdate(
                 "UPDATE liveorder SET coinbase_order_id=?, stopprice=?, limitprice=? WHERE id=?",
                 (new_cb_id, new_stop, new_stop, row['id']))
-            # Replacement is on the book — release the OLD cb_id from the
-            # "in-flight cancel" set so the set doesn't grow unbounded across
-            # trail churn. Any further WS events for the old id are now safe
-            # to terminally cancel (they have no row to corrupt — the row
-            # points at `new_cb_id`).
+            # Replacement is on the book — retire the OLD cb_id from the
+            # "in-flight cancel" set into the time-bounded recent-cancels map.
+            # The row now points at `new_cb_id`, so the old id has no row to
+            # corrupt, BUT its WS CANCELLED push may still be in transit and
+            # must keep being suppressed for the grace window — discarding it
+            # outright here is what made the late push fire a spurious cancel
+            # notification on every trail step.
             if row['coinbase_order_id']:
-                self._trail_canceling_ids.discard(row['coinbase_order_id'])
+                self._retire_trail_cancel_id(row['coinbase_order_id'])
             self._livelog(intent)
             self._log_event('trail:' + tradetype, {
                 'coinbase_order_id': new_cb_id,
@@ -975,11 +1034,13 @@ class LiveTrader:
                 (row_id,))
         except Exception:
             self._livelog(f"Trail retry: failed to clear local state for row {row_id}:\n{traceback.format_exc()}")
-        # The cancelled cb_id no longer points at any tracked row — drop it
-        # from the in-flight cancel set so future WS events for that id take
-        # the normal terminal path (no-op for the row, no notification spam).
+        # The cancelled cb_id no longer points at any tracked row. Retire it
+        # into the recent-cancels map (not an outright discard): its WS
+        # CANCELLED push may still be in transit, and the "normal terminal
+        # path" actually NOTIFIES for a cancel — so without the grace-window
+        # suppression the user gets a spurious ping for this trail cancel.
         if cancelled_cb_id:
-            self._trail_canceling_ids.discard(cancelled_cb_id)
+            self._retire_trail_cancel_id(cancelled_cb_id)
         reason, message, raw = last_failure
         self._livelog(
             f"Trail retry: scheduling row {row_id} after first rejection "
@@ -1344,7 +1405,7 @@ class LiveTrader:
             # markers (kept in /live/history for the audit trail). Real
             # cancels keep `cancel` so they DO show on the chart.
             is_trail_cancel = (status != 'FILLED' and
-                               order_id in self._trail_canceling_ids)
+                               self._is_trail_cancel(order_id))
             if status == 'FILLED':
                 event_type = 'fill'
             elif is_trail_cancel:
