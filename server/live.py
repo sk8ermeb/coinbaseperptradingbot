@@ -467,6 +467,55 @@ class LiveTrader:
             return True
         cb_id = row['coinbase_order_id'] or ''
         tt = row['tradetype'] or 'order'
+
+        # Trail abstraction: a trailing order's *current* exchange order dying
+        # unexpectedly must NOT terminate the logical trail. The script only
+        # ever sees a trail via pendingpositions, which is built solely from
+        # status='open' rows — so marking the row terminal here leaks raw
+        # exchange churn (the cancel/reject/FAILED storm Coinbase throws while
+        # we rapidly re-price a trailing stop) straight into the script's view,
+        # and the next tick's `not pendingpositions` gate then double-issues.
+        #
+        # Anything other than a genuine FILL on the row's live order — FAILED,
+        # or an unexpected CANCELLED/EXPIRED the trail loop did NOT itself
+        # initiate as a cancel+replace — means the stop simply fell off the
+        # book and must be re-placed. Hand it to the 4-attempt retry loop and
+        # keep status='open'. ONLY the retry loop's give-up path (after every
+        # attempt fails) is allowed to mark the row terminal and notify the
+        # user. (FILLED still terminates here — the stop did its job. Trail-
+        # loop-initiated cancel+replace cancels are still handled by the
+        # `_is_trail_cancel` leave-open branch below.)
+        if (float(row['limittrailpercent'] or 0) > 0
+                and status != 'FILLED'
+                and row['id'] not in self._trail_retrying_rows):
+            trail_owned_cancel = (status in ('CANCELLED', 'EXPIRED')
+                                  and self._is_trail_cancel(cb_id))
+            if not trail_owned_cancel:
+                pos = self.namespace.get('realposition', 0)
+                direction = self._trail_direction(row['tradetype'], pos)
+                if direction is not None:
+                    kind, cb_side, stop_dir = direction
+                    product_id = self._ws_product_id or self.pair
+                    self._livelog(
+                        f"Trail order {cb_id} died on exchange ({status}) — "
+                        f"re-placing via retry loop, trail stays active "
+                        f"(not surfacing to script as terminal)."
+                    )
+                    self._log_event('trail-order-died:' + tt, {
+                        'coinbase_order_id': cb_id,
+                        'tradetype': tt,
+                        'status': status,
+                        'limittrailpercent': row['limittrailpercent'] or 0,
+                        'peak_price': row['peak_price'] or 0,
+                    }, notify=False)
+                    self._start_trail_retry(
+                        row['id'], product_id, cb_side, stop_dir, kind,
+                        last_failure=(f'ASYNC_{status}',
+                                      f'live trail order {status} on exchange', ''),
+                        cancelled_cb_id=cb_id,
+                        original_intent=f"re-place trail after live order {status}",
+                    )
+                    return True
         filled_size = float(
             order_payload.get('filled_size',
                               order_payload.get('cumulative_quantity', 0)) or 0)
