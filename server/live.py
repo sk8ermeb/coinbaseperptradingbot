@@ -549,6 +549,14 @@ class LiveTrader:
                 f"Order {cb_id} FILLED {filled_size} @ {avg_price:.2f} "
                 f"(fee ${total_fees:.4f})"
             )
+            # On an exit fill, report the realized profit net of BOTH the entry
+            # and exit fees. Leverage is irrelevant — PnL is purely the change
+            # in contract value (price delta × contracts × contract_size).
+            if tt in ('Exit', 'ExitLong', 'ExitShort'):
+                paf = self._compute_profit_after_fees(
+                    row, order_payload, filled_size, avg_price, total_fees)
+                if paf is not None:
+                    evt['ProfitAfterFees'] = paf
             self._log_event('fill:' + tt, evt)
         elif status in ('CANCELLED', 'EXPIRED'):
             trail_owned = self._is_trail_cancel(cb_id)
@@ -594,6 +602,76 @@ class LiveTrader:
             self._livelog(f"Order {cb_id} unknown status '{status}' — leaving open")
             return False
         return True
+
+    def _position_entry_summary(self):
+        """Sum the entry fills (real fees + size-weighted price) for the
+        position currently being closed, by walking the event log back to the
+        last time we were flat. The boundary is the most recent prior
+        flattening event (any fill:Exit* / fill:Liquidation*); everything after
+        it up to now belongs to the open position. Returns
+        (weighted_entry_price, total_entry_fees, total_entry_contracts) — all
+        derived from the actual fees Coinbase recorded on each entry fill, so
+        no fee-rate guessing. The in-flight fill:Exit isn't logged yet, so the
+        boundary correctly resolves to the PREVIOUS exit."""
+        try:
+            brows = lutil.runselect(
+                "SELECT MAX(time) AS t FROM liveevent WHERE scriptid=? AND "
+                "(eventtype LIKE 'fill:Exit%' OR eventtype LIKE 'fill:Liquidation%')",
+                (self.scriptid,))
+            boundary = (brows[0]['t'] if brows and brows[0]['t'] is not None else 0) or 0
+            erows = lutil.runselect(
+                "SELECT eventdata FROM liveevent WHERE scriptid=? AND time>? AND "
+                "eventtype IN ('fill:Buy','fill:Sell','fill:EnterLong','fill:EnterShort')",
+                (self.scriptid, boundary))
+        except Exception:
+            return 0.0, 0.0, 0.0
+        total_fees = 0.0
+        notional = 0.0
+        contracts = 0.0
+        for r in erows:
+            try:
+                d = json.loads(r['eventdata'])
+            except Exception:
+                continue
+            total_fees += float(d.get('total_fees', 0) or 0)
+            size = self._base_size_to_contracts(str(d.get('filled_size', 0) or 0))
+            price = float(d.get('average_filled_price', 0) or 0)
+            contracts += size
+            notional += size * price
+        weighted_price = (notional / contracts) if contracts > 0 else 0.0
+        return weighted_price, total_fees, contracts
+
+    def _compute_profit_after_fees(self, row, order_payload, exit_filled_size,
+                                   exit_avg_price, exit_fee):
+        """Realized profit on a closed position, net of entry AND exit fees.
+
+        gross = (exit_price - entry_price) × contracts × contract_size × dir
+          dir = +1 closing a long (exit SELL), -1 closing a short (exit BUY).
+        Entry price is the costbasis snapshotted on the row at submit (falls
+        back to the size-weighted entry price from the event log if missing);
+        entry fees come from the real fees Coinbase logged on the entry fills.
+        contract_size converts the contract count into base-asset units so the
+        price delta lands in USD — leverage never enters the calc. Returns None
+        when there's no usable entry price to compute against."""
+        weighted_entry, entry_fees, _ = self._position_entry_summary()
+        try:
+            entry_price = float(row['entry_costbasis'] or 0)
+        except Exception:
+            entry_price = 0.0
+        if entry_price <= 0:
+            entry_price = weighted_entry
+        if entry_price <= 0:
+            return None
+        contracts = self._base_size_to_contracts(str(exit_filled_size or 0))
+        if contracts <= 0:
+            return None
+        cs = self._contract_size or 0
+        base_units = contracts * cs if cs > 0 else contracts
+        side = (order_payload.get('side')
+                or order_payload.get('order_side') or '').upper()
+        direction = -1.0 if side == 'BUY' else 1.0  # SELL closes a long
+        gross = (float(exit_avg_price) - entry_price) * base_units * direction
+        return round(gross - entry_fees - float(exit_fee or 0), 2)
 
     def _read_account_state(self, product_id):
         self.refresh_balance_position(product_id, silent=False)
@@ -2240,15 +2318,21 @@ class LiveTrader:
                     cs = self._contract_size or 0.01
                     btc = float(amount_notional / (limitprice or stopprice or close_price or 1))
                     base_size_f = btc / cs if cs > 0 else btc
+                # Snapshot the position's entry price (costbasis) NOW. By the
+                # time this order fills and fires fill:Exit, refresh_balance_position
+                # has already zeroed costbasis (the position is closed on
+                # Coinbase), so it must be captured at submit to compute the
+                # exit's ProfitAfterFees.
+                entry_costbasis = float(self.namespace.get('costbasis', 0) or 0)
                 lutil.runinsert(
                     "INSERT OR IGNORE INTO liveorder "
                     "(scriptid, coinbase_order_id, internal_id, tradetype, limitprice, stopprice, "
                     "amount, limittrailpercent, stoptrailpercent, status, time, "
-                    "activated, peak_price, hard_stopprice) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "activated, peak_price, hard_stopprice, entry_costbasis) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (self.scriptid, cb_order_id or '', order_id, tradetype.name,
                      limitprice, stopprice, base_size_f, ltp, stp, 'open', int(time.time()),
-                     0, 0.0, float(stopprice)))
+                     0, 0.0, float(stopprice), entry_costbasis))
 
             # Report the contract count actually placed (after auto-size,
             # capping, and granularity rounding), not the raw user input.

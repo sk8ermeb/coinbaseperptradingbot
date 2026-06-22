@@ -68,7 +68,13 @@ def send_notification(event_type, data):
     if not _is_enabled(prefix):
         return
     title = event_type
-    body = json.dumps(data) if isinstance(data, dict) else str(data)
+    # Strip order-placement fields that are noise on a fill push (the stored
+    # liveevent row keeps them — this only trims the notification body).
+    body_data = data
+    if isinstance(data, dict) and event_type in ('fill:Buy', 'fill:Sell', 'fill:Exit'):
+        _hide = ('limitprice', 'stopprice', 'limittrailpercent', 'stoptrailpercent')
+        body_data = {k: v for k, v in data.items() if k not in _hide}
+    body = json.dumps(body_data) if isinstance(body_data, dict) else str(body_data)
     threading.Thread(target=_do_send, args=(ntfy_uuid, title, body), daemon=True).start()
 
 def send_test():

@@ -230,10 +230,13 @@ class util:
                 time INTEGER,
                 activated INTEGER DEFAULT 0,
                 peak_price REAL DEFAULT 0,
-                hard_stopprice REAL DEFAULT 0
+                hard_stopprice REAL DEFAULT 0,
+                entry_costbasis REAL DEFAULT 0
             )""")
             # Migrate existing liveorder tables that predate the trailing-stop columns
-            for col, default in [('activated', '0'), ('peak_price', '0'), ('hard_stopprice', '0')]:
+            # (and entry_costbasis, snapshotted at submit so exit fills can report PnL).
+            for col, default in [('activated', '0'), ('peak_price', '0'), ('hard_stopprice', '0'),
+                                 ('entry_costbasis', '0')]:
                 try:
                     cur.execute(f"ALTER TABLE liveorder ADD COLUMN {col} REAL DEFAULT {default}")
                 except Exception:
