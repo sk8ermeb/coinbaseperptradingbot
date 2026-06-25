@@ -506,7 +506,7 @@ class LiveTrader:
         # Anything other than a genuine FILL on the row's live order — FAILED,
         # or an unexpected CANCELLED/EXPIRED the trail loop did NOT itself
         # initiate as a cancel+replace — means the stop simply fell off the
-        # book and must be re-placed. Hand it to the 4-attempt retry loop and
+        # book and must be re-placed. Hand it to the retry loop and
         # keep status='open'. ONLY the retry loop's give-up path (after every
         # attempt fails) is allowed to mark the row terminal and notify the
         # user. (FILLED still terminates here — the stop did its job. Trail-
@@ -1317,8 +1317,13 @@ class LiveTrader:
     # Delay schedule between trail-place attempts when Coinbase rejects. The
     # first attempt is the synchronous call from `_update_trailing_orders`; the
     # background retry thread then sleeps each of these in turn before the
-    # next attempt. Total = up to 4 attempts (1 + 3 retries) over ~30 seconds.
-    _TRAIL_RETRY_DELAYS = (3, 7, 20)
+    # next attempt. Total = up to 7 attempts (1 + 6 retries) over ~170 seconds.
+    # Deliberately matches _TRAIL_DEATH_COOLDOWNS so a synchronous rejection
+    # gets the same breathing room as an async on-book death — Coinbase's
+    # post-cancel margin cache can take well over 30s to release the freed
+    # margin, so a short burst would give up (PREVIEW_INSUFFICIENT_FUNDS_FOR_
+    # FUTURES) while the funds were merely still settling.
+    _TRAIL_RETRY_DELAYS = (5, 10, 20, 30, 45, 60)
 
     # Circuit breaker. An order that lives at least this long on the book before
     # dying is treated as "recovered" — the next death starts a fresh streak
@@ -1485,6 +1490,9 @@ class LiveTrader:
         the first entry); defaults to the standard schedule."""
         if delays is None:
             delays = list(self._TRAIL_RETRY_DELAYS)
+        # Attempt 1 was the synchronous place in _update_trailing_orders; this
+        # thread runs attempts 2..N, one per delay.
+        total_attempts = len(delays) + 1
         cb = CoinbaseHTTP()
         try:
             for attempt_idx, delay in enumerate(delays, start=2):
@@ -1527,7 +1535,7 @@ class LiveTrader:
                 amount_btc = float(row['amount']) * cs
                 base_size = self._format_base_size(self._round_to_increment(amount_btc))
                 new_cb_id = str(uuid.uuid4())
-                intent = (f"TRAIL RETRY {attempt_idx}/4 (after {delay}s) {cb_side} "
+                intent = (f"TRAIL RETRY {attempt_idx}/{total_attempts} (after {delay}s) {cb_side} "
                           f"stop_limit {base_size} @ {new_stop:.2f} "
                           f"[{tradetype} peak {peak:.2f} trail:{ltp*100:.2f}%]")
                 self._livelog(intent)
@@ -1544,7 +1552,7 @@ class LiveTrader:
                 except Exception:
                     tb = traceback.format_exc()
                     self._livelog(
-                        f"Trail retry {attempt_idx}/4 EXCEPTION for row {row_id}:\n{tb}"
+                        f"Trail retry {attempt_idx}/{total_attempts} EXCEPTION for row {row_id}:\n{tb}"
                     )
                     last_failure = ('EXCEPTION', tb.splitlines()[-1][:300], '')
                     continue
@@ -1553,7 +1561,7 @@ class LiveTrader:
                 if not ok:
                     self._notify_order_error(intent, reason, message, raw, notify=False)
                     self._livelog(
-                        f"Trail retry {attempt_idx}/4 REJECTED for row {row_id}: [{reason}] {message}"
+                        f"Trail retry {attempt_idx}/{total_attempts} REJECTED for row {row_id}: [{reason}] {message}"
                     )
                     last_failure = (reason, message, raw)
                     continue
@@ -1565,7 +1573,7 @@ class LiveTrader:
                 self._note_trail_placement(row_id)
                 self._track_placed_order(new_cb_id)
                 self._livelog(
-                    f"Trail retry {attempt_idx}/4 SUCCEEDED for row {row_id}: {intent}"
+                    f"Trail retry {attempt_idx}/{total_attempts} SUCCEEDED for row {row_id}: {intent}"
                 )
                 self._log_event('trail-retry:success', {
                     'liveorder_id': row_id,
