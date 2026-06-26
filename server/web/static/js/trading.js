@@ -333,8 +333,18 @@ async function loadCandles(fitView = true) {
     eventlist = data.events || [];
     applyEventFilters();
     drawOrderPriceLines(data.internal || []);
-    if (fitView) chart.timeScale().fitContent();
+    if (fitView) zoomToRecentCandles(20);
   } catch(e) {}
+}
+
+// Default chart view: zoom to the most recent `n` candles instead of fitting
+// the whole history. Falls back to fitContent when there are fewer than `n`
+// bars. The 0.5 padding keeps the latest candle off the right edge.
+function zoomToRecentCandles(n = 20) {
+  const count = candleslist.length;
+  if (!count) return;
+  if (count <= n) { chart.timeScale().fitContent(); return; }
+  chart.timeScale().setVisibleLogicalRange({ from: count - n - 0.5, to: count - 0.5 });
 }
 
 function eventCategory(eventtype) {
@@ -617,6 +627,119 @@ function renderEvents(events, page) {
     status.textContent = `Page ${page + 1} — ${events.length} event${events.length === 1 ? '' : 's'}`;
   }
   paginationEl.appendChild(status);
+}
+
+// ------------------------------------------------------------------ financials tab
+
+let finPage = 0;
+
+async function loadFinancials(page = 0) {
+  if (page < 0) page = 0;
+  finPage = page;
+  try {
+    const sid = document.getElementById('scriptDropdown').value;
+    const sidParam = (sid && parseInt(sid) >= 0) ? `&scriptid=${encodeURIComponent(sid)}` : '';
+    const resp = await fetch(`/api/live/financials?page=${page}${sidParam}`);
+    if (!resp.ok) return;
+    const data = await resp.json();
+    renderFinancials(data);
+  } catch(e) {}
+}
+
+// Compact UTC timestamp for the financials table, e.g. "Jun 26, 5:25"
+// (three-letter month, day, no year, no seconds, no leading-zero hour).
+function fmtShort(unixSecs) {
+  const d = new Date(unixSecs * 1000);
+  const mo = d.toLocaleString('en-US', { month: 'short', timeZone: 'UTC' });
+  const m = String(d.getUTCMinutes()).padStart(2, '0');
+  return `${mo} ${d.getUTCDate()}, ${d.getUTCHours()}:${m}`;
+}
+
+function dirBadge(dir) {
+  if (dir === 'Buy')  return '<span class="badge bg-success">Buy</span>';
+  if (dir === 'Sell') return '<span class="badge bg-danger">Sell</span>';
+  return `<span class="badge bg-secondary">${dir || '—'}</span>`;
+}
+
+async function attemptFix() {
+  if (!confirm('Reconcile against Coinbase records and write recovered fills/fees ' +
+               'into the trading log? This updates history in place.')) return;
+  const btn = document.getElementById('attemptFixBtn');
+  const result = document.getElementById('finFixResult');
+  const orig = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Reconciling…';
+  result.innerHTML = '';
+  try {
+    const sid = document.getElementById('scriptDropdown').value;
+    const sidParam = (sid && parseInt(sid) >= 0) ? `?scriptid=${encodeURIComponent(sid)}` : '';
+    const resp = await fetch(`/api/live/financials/fix${sidParam}`, { method: 'POST' });
+    const data = await resp.json();
+    if (!resp.ok || data.ok === false) {
+      result.innerHTML = `<span class="text-danger">Fix failed: ${data.error || resp.status}</span>`;
+    } else {
+      const parts = [
+        `${data.cb_fills || 0} Coinbase fills scanned`,
+        `${data.enriched || 0} events enriched`,
+        `${data.inserted || 0} missing entries recovered`,
+        `${data.pnl_updated || 0} PnL values corrected`,
+      ];
+      let msg = `<span class="text-success">Done — ${parts.join(', ')}.</span>`;
+      if (data.errors && data.errors.length) {
+        msg += ` <span class="text-warning">(${data.errors.length} warning(s): ${data.errors.join('; ')})</span>`;
+      }
+      result.innerHTML = msg;
+    }
+  } catch (e) {
+    result.innerHTML = `<span class="text-danger">Fix failed: ${e}</span>`;
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = orig;
+    loadFinancials(0);
+  }
+}
+
+function renderFinancials(data) {
+  const tbody = document.getElementById('financialsbody');
+  tbody.innerHTML = '';
+  const rows = data.rows || [];
+  const PER_PAGE = 10;
+
+  if (rows.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="11" class="text-center text-muted py-3">${
+      data.page > 0 ? 'No older positions' : 'No closed positions yet'}</td></tr>`;
+  } else {
+    rows.forEach((r, i) => {
+      const rowNum = data.page * PER_PAGE + i + 1;
+      const pnl = r.total_pnl;
+      const pnlCls = pnl == null ? 'text-muted' : (pnl >= 0 ? 'text-success' : 'text-danger');
+      const pnlTxt = pnl == null ? '—' : (pnl >= 0 ? '+$' + fmt(pnl) : '-$' + fmt(Math.abs(pnl)));
+      const exitDir = r.liquidation
+        ? '<span class="badge bg-warning text-dark">Liq</span>'
+        : (r.exit_dir ? dirBadge(r.exit_dir) : '—');
+      const hasEntry = r.entry_time != null;
+      const tr = document.createElement('tr');
+      tr.innerHTML =
+        `<td class="text-center text-muted border-end">${rowNum}</td>` +
+        `<td class="text-center">${hasEntry ? dirBadge(r.entry_dir) : '—'}</td>` +
+        `<td class="small">${hasEntry ? fmtShort(r.entry_time) : '—'}</td>` +
+        `<td class="text-end">${hasEntry ? fmt(r.entry_contracts, 0) : '—'}</td>` +
+        `<td class="text-end border-end">${r.entry_price ? '$' + fmt(r.entry_price) : '—'}</td>` +
+        `<td class="text-center">${exitDir}</td>` +
+        `<td class="small">${fmtShort(r.exit_time)}</td>` +
+        `<td class="text-end">${fmt(r.exit_contracts, 0)}</td>` +
+        `<td class="text-end border-end">${r.exit_price ? '$' + fmt(r.exit_price) : '—'}</td>` +
+        `<td class="text-end text-muted">$${fmt(r.total_fees)}</td>` +
+        `<td class="text-end fw-bold ${pnlCls}">${pnlTxt}</td>`;
+      tbody.appendChild(tr);
+    });
+  }
+
+  document.getElementById('finPrev').disabled = data.page <= 0;
+  document.getElementById('finNext').disabled = !data.has_more;
+  const total = data.total || 0;
+  document.getElementById('finPageLabel').textContent =
+    total ? `Page ${data.page + 1} — ${total} closed position${total === 1 ? '' : 's'}` : '';
 }
 
 // ------------------------------------------------------------------ tick detail modal

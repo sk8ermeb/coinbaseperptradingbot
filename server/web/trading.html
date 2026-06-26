@@ -51,6 +51,9 @@
   <li class="nav-item">
     <button class="nav-link" data-bs-toggle="tab" data-bs-target="#historytab">History</button>
   </li>
+  <li class="nav-item">
+    <button class="nav-link" data-bs-toggle="tab" data-bs-target="#financialstab" onclick="loadFinancials(0)">Financials</button>
+  </li>
 </ul>
 
 <div class="tab-content">
@@ -74,6 +77,7 @@
         <input class="form-check-input" type="checkbox" id="chkCancel" onchange="onEventFilterChange()">
         <label class="form-check-label" for="chkCancel">Cancel</label>
       </div>
+      <button type="button" class="btn btn-sm btn-outline-secondary ms-2" onclick="zoomToRecentCandles(20)">Reset Zoom</button>
     </div>
     <div class="container-fluid" style="overflow:hidden;">
       <div class="d-flex flex-column flex-md-row flex-nowrap">
@@ -145,6 +149,46 @@
         <tbody id="eventbody"></tbody>
       </table>
       <div id="eventpagination" class="mt-2 mb-3"></div>
+    </div>
+  </div>
+
+  <!-- Financials tab -->
+  <div class="tab-pane" id="financialstab">
+    <div class="container-fluid py-3">
+      <div class="d-flex align-items-center mb-2">
+        <h6 class="mb-0">Closed Positions</h6>
+        <button type="button" class="btn btn-sm btn-warning ms-auto" id="attemptFixBtn" onclick="attemptFix()"
+                title="Reconcile the local log against Coinbase records and fill in missing entries/fees">
+          <i class="bi bi-wrench-adjustable"></i> Attempt Fix
+        </button>
+        <button type="button" class="btn btn-sm btn-outline-secondary ms-2" onclick="loadFinancials(finPage)" title="Refresh">
+          <i class="bi bi-arrow-clockwise"></i>
+        </button>
+      </div>
+      <div id="finFixResult" class="small mb-2"></div>
+      <div class="table-responsive">
+        <table class="table table-sm table-striped table-hover align-middle mb-2" id="financialstable">
+          <thead class="table-dark">
+            <tr>
+              <th rowspan="2" class="text-center align-middle border-end">#</th>
+              <th colspan="4" class="text-center border-end">Entry</th>
+              <th colspan="4" class="text-center border-end">Exit</th>
+              <th rowspan="2" class="text-end align-middle">Total Fees</th>
+              <th rowspan="2" class="text-end align-middle">Total PnL</th>
+            </tr>
+            <tr>
+              <th class="text-center">Dir</th><th>Time</th><th class="text-end">Contracts</th><th class="text-end border-end">Price</th>
+              <th class="text-center">Dir</th><th>Time</th><th class="text-end">Contracts</th><th class="text-end border-end">Price</th>
+            </tr>
+          </thead>
+          <tbody id="financialsbody"></tbody>
+        </table>
+      </div>
+      <div class="d-flex align-items-center gap-2">
+        <button type="button" class="btn btn-sm btn-outline-secondary" id="finPrev" onclick="loadFinancials(finPage-1)">&larr; Newer</button>
+        <span class="small text-muted" id="finPageLabel"></span>
+        <button type="button" class="btn btn-sm btn-outline-secondary" id="finNext" onclick="loadFinancials(finPage+1)">Older &rarr;</button>
+      </div>
     </div>
   </div>
 

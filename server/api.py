@@ -655,6 +655,393 @@ async def live_history(session: str = Depends(require_session), page: int = Quer
     return JSONResponse({'events': events, 'orders': orders, 'page': page})
 
 
+# ------------------------------------------------------------------ financials helpers
+# Shared by /live/financials (display) and /live/financials/fix (reconcile) so the
+# two always agree on how fills pair into round-trips.
+
+_FILL_EXIT_TYPES = ('fill:Exit', 'fill:ExitLong', 'fill:ExitShort', 'fill:Liquidation')
+
+
+def _normalize_fill_events(rows):
+    """Normalize raw liveevent fill rows to a common shape across both log
+    schemas: the rich suffixed schema (tradetype/amount/average_filled_price/
+    total_fees/coinbase_order_id) and the lean reconciliation schema
+    (side/filled/avg_price/order_id, no fees). Carries the DB row id so callers
+    can write corrections back to the source event."""
+    norm = []
+    for r in rows:
+        et = r['eventtype']
+        try:
+            d = json.loads(r['eventdata']) if r['eventdata'] else {}
+        except Exception:
+            d = {}
+        tt = d.get('tradetype') or (et.split(':', 1)[1] if ':' in et else '')
+        side = (d.get('side') or '').upper()  # reconciliation schema
+        # Side: long-opening (Buy) vs short-opening (Sell), independent of
+        # whether this fill is an entry or an exit.
+        if tt in ('Buy', 'EnterLong') or side == 'BUY':
+            sidetag = 'Buy'
+        elif tt in ('Sell', 'EnterShort') or side == 'SELL':
+            sidetag = 'Sell'
+        else:
+            sidetag = ''  # bare Exit/Liquidation — direction resolved from position
+        norm.append({
+            'id': r['id'],
+            'is_exit': (et in _FILL_EXIT_TYPES),
+            'is_liq': et.startswith('fill:Liquidation'),
+            'sidetag': sidetag,
+            'tt': tt,
+            'oid': d.get('coinbase_order_id') or d.get('order_id') or '',
+            'time': int(r['time']),
+            'contracts': abs(float(d.get('amount', d.get('filled', 0)) or 0)),
+            'price': float(d.get('average_filled_price', d.get('avg_price', 0)) or 0),
+            'fees': float(d.get('total_fees', 0) or 0),
+            'paf': d.get('ProfitAfterFees'),
+            'has_tt': bool(d.get('tradetype')),
+        })
+    return norm
+
+
+def _dedupe_fills(norm):
+    """Collapse fills logged twice (same order id under both schemas), keeping
+    the richer record (the one carrying a tradetype), then sort by time."""
+    seen = {}  # order id -> index into deduped
+    deduped = []
+    for f in norm:
+        oid = f['oid']
+        if oid and oid in seen:
+            idx = seen[oid]
+            if f['has_tt'] and not deduped[idx]['has_tt']:
+                deduped[idx] = f  # upgrade to the richer copy
+            continue
+        if oid:
+            seen[oid] = len(deduped)
+        deduped.append(f)
+    deduped.sort(key=lambda f: f['time'])
+    return deduped
+
+
+def _pair_fills(deduped):
+    """Position-aware walk: fills opening/adding to a position accumulate as
+    entry legs; the first opposite-side (or explicit exit) fill closes it and
+    emits one round-trip. A still-open trailing position is not emitted."""
+    completed = []
+
+    def _emit(pending, exitf):
+        entry_contracts = sum(p['contracts'] for p in pending)
+        entry_fees = sum(p['fees'] for p in pending)
+        notional = sum(p['contracts'] * p['price'] for p in pending)
+        entry_price = (notional / entry_contracts) if entry_contracts > 0 else 0.0
+        entry_dir = pending[0]['sidetag'] if pending else None
+        entry_time = pending[0]['time'] if pending else None
+        completed.append({
+            'entry_dir': entry_dir,
+            'entry_time': entry_time,
+            'entry_contracts': entry_contracts,
+            'entry_price': entry_price,
+            'exit_dir': (exitf['sidetag'] or
+                         (None if entry_dir is None else
+                          ('Sell' if entry_dir == 'Buy' else 'Buy'))),
+            'exit_time': exitf['time'],
+            'exit_contracts': exitf['contracts'],
+            'exit_price': exitf['price'],
+            'total_fees': entry_fees + exitf['fees'],
+            'total_pnl': (float(exitf['paf']) if exitf['paf'] is not None else None),
+            'liquidation': exitf['is_liq'],
+            'exit_id': exitf['id'],
+            'entry_ids': [p['id'] for p in pending],
+        })
+
+    pending = []
+    for f in deduped:
+        opp = (pending and f['sidetag'] and f['sidetag'] != pending[0]['sidetag'])
+        if f['is_exit'] or opp:
+            _emit(pending, f)
+            pending = []
+        else:
+            pending.append(f)
+    return completed
+
+
+def _load_round_trips(scriptid):
+    """Full pipeline: load fill events for a script, normalize, dedupe, pair."""
+    rows = autil.runselect(
+        "SELECT id, eventtype, eventdata, time FROM liveevent WHERE scriptid=? AND "
+        "(eventtype LIKE 'fill:%' OR eventtype='fill') ORDER BY time ASC, id ASC",
+        (int(scriptid),))
+    return _pair_fills(_dedupe_fills(_normalize_fill_events(rows)))
+
+
+@router.get("/live/financials")
+async def live_financials(session: str = Depends(require_session),
+                          scriptid: int = Query(None),
+                          page: int = Query(0)):
+    """Paired entry→exit round-trips for the Financials tab, most-recent-first,
+    10 rows per page. PnL comes from the exit fill's stored ProfitAfterFees
+    (already net of BOTH entry and exit fees); total fees is the sum of every
+    entry-leg fee plus the exit fee. See the helpers above for the pairing."""
+    if scriptid is None:
+        scriptid = autil.getkeyval('live_scriptid')
+    if not scriptid:
+        return JSONResponse({'rows': [], 'page': page, 'has_more': False})
+
+    PER_PAGE = 10
+    completed = _load_round_trips(scriptid)
+    completed.reverse()  # most recent first
+    start = page * PER_PAGE
+    page_rows = completed[start:start + PER_PAGE]
+    has_more = len(completed) > start + PER_PAGE
+    return JSONResponse({'rows': page_rows, 'page': page, 'has_more': has_more,
+                         'total': len(completed)})
+
+
+@router.post("/live/financials/fix")
+async def live_financials_fix(session: str = Depends(require_session),
+                              scriptid: int = Query(None)):
+    """Reconcile the local fill log against Coinbase's authoritative fills and
+    repair gaps in place (the user opted for apply-immediately):
+
+      1. Pull every Coinbase fill (paginated) for each product the script traded,
+         bounded to the script's event time window, and aggregate per order id
+         (size-weighted price, summed commission, side, earliest trade time).
+      2. Self-calibrate the size→contracts ratio from any order present in BOTH
+         the local log (known contract amount) and Coinbase (raw size) — avoids
+         guessing the product's size unit.
+      3. For each local fill event, fill in any missing price / contracts / fees
+         from the matching Coinbase order (never overwrites good values, only
+         fills zeros/blanks), and stamp it reconciled.
+      4. For Coinbase orders with no local fill event at all (entries dropped
+         during the failure/retry handling), insert a synthetic fill:<side>
+         event at the Coinbase trade time so the round-trip is complete.
+      5. Recompute ProfitAfterFees on every exit event from the now-complete
+         entry/exit prices, contracts, fees, and the product contract_size.
+
+    Idempotent: re-running matches the synthetic events by order id and only
+    re-applies the same authoritative values."""
+    from coinbase_http import CoinbaseHTTP, KNOWN_CONTRACT_SIZES
+    from datetime import datetime, timezone
+
+    if scriptid is None:
+        scriptid = autil.getkeyval('live_scriptid')
+    if not scriptid:
+        return JSONResponse({'ok': False, 'error': 'No script selected.'})
+    scriptid = int(scriptid)
+
+    summary = {'ok': True, 'products': [], 'enriched': 0, 'inserted': 0,
+               'pnl_updated': 0, 'cb_fills': 0, 'errors': []}
+
+    # ---- Source events: discover products + time window --------------------
+    rows = autil.runselect(
+        "SELECT id, eventtype, eventdata, time FROM liveevent WHERE scriptid=? AND "
+        "(eventtype LIKE 'fill:%' OR eventtype='fill') ORDER BY time ASC, id ASC",
+        (scriptid,))
+    if not rows:
+        return JSONResponse({'ok': True, 'message': 'No fills to reconcile.',
+                             **summary})
+
+    products = set()
+    times = []
+    for r in rows:
+        times.append(int(r['time']))
+        try:
+            d = json.loads(r['eventdata']) if r['eventdata'] else {}
+        except Exception:
+            d = {}
+        if d.get('product_id'):
+            products.add(d['product_id'])
+    cfg_pair = autil.getkeyval('live_pair')
+    if cfg_pair:
+        products.add(cfg_pair)
+    if not products:
+        return JSONResponse({'ok': False, 'error': 'Could not determine product id.'})
+    # 2-day pad around the window so boundary fills are captured.
+    start_ts = min(times) - 2 * 86400
+    end_ts = max(times) + 2 * 86400
+
+    def _iso(ts):
+        return datetime.fromtimestamp(ts, tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+    def _parse_ts(s):
+        if not s:
+            return None
+        try:
+            return int(datetime.fromisoformat(s.replace('Z', '+00:00')).timestamp())
+        except Exception:
+            return None
+
+    cb = CoinbaseHTTP()
+
+    # ---- 1. Pull + aggregate Coinbase fills per order id -------------------
+    cb_orders = {}  # order_id -> {side, size, notional, commission, time}
+    for pid in products:
+        summary['products'].append(pid)
+        cursor = None
+        pages = 0
+        try:
+            while pages < 100:  # hard cap against runaway pagination
+                resp = cb.list_fills(product_id=pid,
+                                     start_sequence_timestamp=_iso(start_ts),
+                                     end_sequence_timestamp=_iso(end_ts),
+                                     limit=100, cursor=cursor) or {}
+                fills = resp.get('fills', []) or []
+                for fl in fills:
+                    oid = fl.get('order_id') or ''
+                    if not oid:
+                        continue
+                    size = abs(float(fl.get('size', 0) or 0))
+                    price = float(fl.get('price', 0) or 0)
+                    comm = float(fl.get('commission', 0) or 0)
+                    side = (fl.get('side') or '').upper().replace('FUTURES_ORDER_SIDE_', '')
+                    t = _parse_ts(fl.get('trade_time') or fl.get('sequence_timestamp'))
+                    agg = cb_orders.setdefault(oid, {
+                        'side': side, 'size': 0.0, 'notional': 0.0,
+                        'commission': 0.0, 'time': t})
+                    agg['size'] += size
+                    agg['notional'] += size * price
+                    agg['commission'] += comm
+                    if side:
+                        agg['side'] = side
+                    if t is not None and (agg['time'] is None or t < agg['time']):
+                        agg['time'] = t
+                    summary['cb_fills'] += 1
+                cursor = resp.get('cursor')
+                pages += 1
+                if not cursor or not fills:
+                    break
+        except Exception as e:
+            summary['errors'].append(f'list_fills({pid}): {e}')
+
+    if not cb_orders:
+        summary['message'] = ('No Coinbase fills returned for the window — '
+                              'nothing to reconcile.')
+        return JSONResponse(summary)
+
+    for agg in cb_orders.values():
+        agg['avg_price'] = (agg['notional'] / agg['size']) if agg['size'] > 0 else 0.0
+
+    # ---- 2. Self-calibrate the size→contracts ratio -----------------------
+    norm = _normalize_fill_events(rows)
+    local_by_oid = {f['oid']: f for f in norm if f['oid']}
+    ratio = 1.0
+    for oid, lf in local_by_oid.items():
+        agg = cb_orders.get(oid)
+        if agg and agg['size'] > 0 and lf['contracts'] > 0:
+            ratio = lf['contracts'] / agg['size']
+            break
+
+    def _contracts(size):
+        return size * ratio
+
+    # ---- contract_size per product (for PnL $ value) ----------------------
+    contract_size = None
+    for pid in products:
+        try:
+            prod = cb.get_product(pid) or {}
+            fd = prod.get('future_product_details') or {}
+            cs = float(fd.get('contract_size', 0) or 0)
+            venue = (prod.get('product_venue') or '').upper()
+            if venue == 'INTX' and KNOWN_CONTRACT_SIZES.get(pid):
+                cs = KNOWN_CONTRACT_SIZES[pid]
+            if cs > 0:
+                contract_size = cs
+                break
+        except Exception as e:
+            summary['errors'].append(f'get_product({pid}): {e}')
+    if not contract_size:
+        contract_size = 1.0
+
+    # ---- 3. Enrich existing local fill events -----------------------------
+    for lf in norm:
+        agg = cb_orders.get(lf['oid'])
+        if not agg:
+            continue
+        try:
+            erows = autil.runselect(
+                "SELECT eventdata FROM liveevent WHERE id=?", (lf['id'],))
+            d = json.loads(erows[0]['eventdata']) if erows and erows[0]['eventdata'] else {}
+        except Exception:
+            d = {}
+        changed = False
+        cb_contracts = _contracts(agg['size'])
+        # Only fill blanks/zeros — never clobber values the bot logged correctly.
+        if not float(d.get('average_filled_price', 0) or 0) and agg['avg_price']:
+            d['average_filled_price'] = round(agg['avg_price'], 8); changed = True
+        if not float(d.get('amount', 0) or 0) and cb_contracts:
+            d['amount'] = round(cb_contracts, 8); changed = True
+        if not float(d.get('total_fees', 0) or 0) and agg['commission']:
+            d['total_fees'] = round(agg['commission'], 8); changed = True
+        if changed:
+            d['reconciled'] = True
+            autil.runupdate("UPDATE liveevent SET eventdata=? WHERE id=?",
+                            (json.dumps(d), lf['id']))
+            summary['enriched'] += 1
+
+    # ---- 4. Insert synthetic events for orders missing locally -------------
+    # Guard against duplicates when a real fill was logged under a different
+    # order id than Coinbase reports: skip if a local fill of the same side
+    # sits within 3 minutes of this Coinbase trade (real trades here are hours
+    # apart, so this only catches the same fill, never a distinct one).
+    local_fills_by_side = {}
+    for lf in norm:
+        if lf['sidetag']:
+            local_fills_by_side.setdefault(lf['sidetag'], []).append(lf['time'])
+
+    for oid, agg in cb_orders.items():
+        if oid in local_by_oid:
+            continue
+        side = agg['side']
+        if side not in ('BUY', 'SELL'):
+            continue
+        sidetag = 'Buy' if side == 'BUY' else 'Sell'
+        at = agg['time'] or int(min(times))
+        if any(abs(at - t) < 180 for t in local_fills_by_side.get(sidetag, [])):
+            continue
+        et = 'fill:Buy' if side == 'BUY' else 'fill:Sell'
+        d = {
+            'coinbase_order_id': oid,
+            'tradetype': 'Buy' if side == 'BUY' else 'Sell',
+            'amount': round(_contracts(agg['size']), 8),
+            'average_filled_price': round(agg['avg_price'], 8),
+            'total_fees': round(agg['commission'], 8),
+            'status': 'FILLED',
+            'reconstructed': True,
+        }
+        autil.runinsert(
+            "INSERT INTO liveevent (scriptid, eventtype, eventdata, time) "
+            "VALUES (?,?,?,?)",
+            (scriptid, et, json.dumps(d), at))
+        local_by_oid[oid] = True
+        summary['inserted'] += 1
+
+    # ---- 5. Recompute ProfitAfterFees on every exit event -----------------
+    completed = _load_round_trips(scriptid)
+    for rt in completed:
+        if not rt.get('exit_id') or not rt['entry_dir'] or not rt['entry_price'] \
+                or not rt['exit_price'] or not rt['exit_contracts']:
+            continue
+        sign = 1.0 if rt['entry_dir'] == 'Buy' else -1.0
+        gross = sign * (rt['exit_price'] - rt['entry_price']) * \
+            rt['exit_contracts'] * contract_size
+        net = gross - rt['total_fees']
+        try:
+            erows = autil.runselect(
+                "SELECT eventdata FROM liveevent WHERE id=?", (rt['exit_id'],))
+            d = json.loads(erows[0]['eventdata']) if erows and erows[0]['eventdata'] else {}
+        except Exception:
+            d = {}
+        if abs(float(d.get('ProfitAfterFees', 0) or 0) - net) > 0.005:
+            d['ProfitAfterFees'] = round(net, 4)
+            d['reconciled'] = True
+            autil.runupdate("UPDATE liveevent SET eventdata=? WHERE id=?",
+                            (json.dumps(d), rt['exit_id']))
+            summary['pnl_updated'] += 1
+
+    summary['round_trips'] = len(completed)
+    summary['contract_size'] = contract_size
+    summary['size_ratio'] = ratio
+    return JSONResponse(summary)
+
+
 @router.get("/live/tick_detail")
 async def live_tick_detail(session: str = Depends(require_session),
                            event_id: int = Query(...)):
