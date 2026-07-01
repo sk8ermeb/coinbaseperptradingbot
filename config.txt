@@ -5,12 +5,12 @@ serverip:0.0.0.0
 serverport:8083
 
 #don't require login to use the server
-anonymous:false
+anonymous:true
 
 #set a user name and password if anonomous is set to false.
 #this will be a simple login for the site.
 user:bob
-pass:1q@W3e$R
+pass:abcd1234
 
 #set this to true if you want interactions to be encrypted
 #definitely set to true if you set anonymous to false otherwise
@@ -20,6 +20,6 @@ pass:1q@W3e$R
 #data file data/server.crt and data/server.pem for the cert and
 #key respectively. The system will autgenerate one if they aren't
 #present
-tls:true
+tls:false
 
 
